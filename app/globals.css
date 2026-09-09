@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0a0f1c;
+  --foreground: #ffffff;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/*
+ * This app is always dark-themed by design (matches the viewport
+ * themeColor in layout.tsx) — there's no light-mode variant, so no
+ * `prefers-color-scheme` override is needed here.
+ */
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+}
