@@ -484,6 +484,17 @@ export default function Home() {
           <span className="text-[10px] font-bold">פיד</span>
         </button>
       </div>
+
+      {showAuthModal && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onClick={() => setShowAuthModal(false)}>
+          <div className="w-full max-w-sm bg-[#111827] border border-white/10 rounded-[2rem] p-6 text-center" onClick={e => e.stopPropagation()}>
+            <h3 className="text-xl font-black mb-2">צריך להתחבר קודם</h3>
+            <p className="text-gray-400 text-sm font-bold mb-6">כדי להצביע ביותר מ-3 סקרים או ליצור סקר חדש, יש להתחבר</p>
+            <a href="/login" className="block w-full bg-gradient-to-r from-cyan-500 to-pink-500 text-white font-black py-3 rounded-xl active:scale-95 transition-all mb-2">התחבר</a>
+            <button onClick={() => setShowAuthModal(false)} className="w-full text-gray-400 font-bold py-2 text-sm">לא עכשיו</button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
