@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect, useRef } from 'react';
+import type { Session } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase/client';
 // Trend Graph Component
 const TrendGraph = ({ trend }: { trend: any[] }) => {
@@ -31,6 +32,32 @@ const TrendGraph = ({ trend }: { trend: any[] }) => {
   );
 };
 
+const DEFAULT_STATS = {
+  topCityA: "מחשב...",
+  topCityB: "מחשב...",
+  ageDistribution: [{ label: '0-18', a: 50, b: 50 }, { label: '19-25', a: 50, b: 50 }, { label: '26-35', a: 50, b: 50 }, { label: '36+', a: 50, b: 50 }],
+  trendHistory: [{ label: 'היום', a: 50, b: 50 }],
+};
+
+function shuffleArray<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// Box size never changes — font shrinks to fit instead, based on text length.
+function getOptionFontSizeClass(text: string): string {
+  const len = text?.length || 0;
+  if (len <= 8) return 'text-3xl';
+  if (len <= 14) return 'text-2xl';
+  if (len <= 22) return 'text-xl';
+  if (len <= 32) return 'text-lg';
+  return 'text-base';
+}
+
 export default function Home() {
   const [user, setUser] = useState<any>(null);
   const [userRole, setUserRole] = useState<string>('user');
@@ -51,6 +78,9 @@ export default function Home() {
   
   const [activeTab, setActiveTab] = useState<'feed' | 'filters' | 'create'>('feed');
   const [activeFilter, setActiveFilter] = useState<string>('all');
+  const [selectedTags, setSelectedTags] = useState<string[] | null>(null); // null = all tags, no filtering
+  const [voteStatusFilter, setVoteStatusFilter] = useState<'unvoted' | 'voted' | 'all'>('unvoted');
+  const [tagSearch, setTagSearch] = useState('');
   
   const [newPollType, setNewPollType] = useState<'blitz' | 'duel'>('blitz');
   const [newPollTitle, setNewPollTitle] = useState('');
@@ -66,9 +96,32 @@ export default function Home() {
   const touchStartX = useRef<number | null>(null);
 
   // --- MOVED DERIVED STATE TO TOP ---
-  const filteredPolls = activeFilter === 'all' ? polls : polls.filter(p => p.type === activeFilter);
+  const allTags = Array.from(new Set(polls.flatMap(p => (p.tags as string[] | undefined) || [])));
+  const tagsAreFiltered = selectedTags !== null && selectedTags.length < allTags.length;
+
+  const filteredPolls = polls.filter(p => {
+    const typeMatch = activeFilter === 'all' || p.poll_type === activeFilter;
+    const tagMatch = !tagsAreFiltered || (p.tags?.some((t: string) => selectedTags!.includes(t)) ?? false);
+    const voteMatch = voteStatusFilter === 'all' || (voteStatusFilter === 'voted' ? p.id in votedPolls : !(p.id in votedPolls));
+    return typeMatch && tagMatch && voteMatch;
+  });
   const safeIndex = filteredPolls.length > 0 ? ((currentIndex % filteredPolls.length) + filteredPolls.length) % filteredPolls.length : 0;
   const currentPoll = filteredPolls[safeIndex];
+
+  const isTagSelected = (tag: string) => selectedTags === null || selectedTags.includes(tag);
+  const allTagsSelected = selectedTags === null || selectedTags.length === allTags.length;
+  const toggleTag = (tag: string) => {
+    setSelectedTags(prev => {
+      const current = prev === null ? allTags : prev;
+      return current.includes(tag) ? current.filter(t => t !== tag) : [...current, tag];
+    });
+  };
+  const toggleAllTags = () => {
+    setSelectedTags(prev => {
+      const current = prev === null ? allTags : prev;
+      return current.length === allTags.length ? [] : allTags;
+    });
+  };
   
   const displayStats = currentPoll && (showStats || currentPoll.id in votedPolls);
   const userChoice = currentPoll ? votedPolls[currentPoll.id] : null;
@@ -83,7 +136,7 @@ export default function Home() {
   const percentA = totalVotes > 0 ? Math.round((displayVotesA / totalVotes) * 100) : 50;
   const percentB = totalVotes > 0 ? Math.round((displayVotesB / totalVotes) * 100) : 50;
   
-  const statsData = currentPoll ? (pollStats[currentPoll.id] || { topCityA: "מחשב...", topCityB: "מחשב...", ageDistribution: [{label: '0-18', a:50, b:50}, {label: '19-25', a:50, b:50}, {label: '26-35', a:50, b:50}, {label: '36+', a:50, b:50}], trendHistory: [{label: 'היום', a:50, b:50}] }) : null;
+  const statsData = currentPoll ? (pollStats[currentPoll.id] || DEFAULT_STATS) : null;
   // ----------------------------------
 
   useEffect(() => {
@@ -100,12 +153,12 @@ export default function Home() {
     };
     fetchGovCities();
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    supabase.auth.getSession().then(({ data: { session } }: { data: { session: Session | null } }) => {
       setUser(session?.user || null);
       if (session?.user) fetchUserData(session.user.id);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: string, session: Session | null) => {
       setUser(session?.user || null);
       if (session?.user) fetchUserData(session.user.id);
       else { setUserRole('user'); setIsProfileIncomplete(false); }
@@ -125,12 +178,14 @@ export default function Home() {
         .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
         .order('created_at', { ascending: false }); 
       
-      if (pollData) setPolls(pollData);
+      if (pollData) setPolls(shuffleArray(pollData));
 
-      const { data: voteData } = await supabase.from('votes').select('poll_id, choice').eq('device_id', deviceId);
+      // Votes are no longer publicly SELECTable directly (privacy) — use the
+      // narrow get_my_votes RPC instead, which only ever returns your own.
+      const { data: voteData } = await supabase.rpc('get_my_votes', { p_device_id: deviceId });
       if (voteData) {
         const dbVotes: Record<string, string> = {};
-        voteData.forEach(v => { dbVotes[v.poll_id] = v.choice; });
+        voteData.forEach((v: { poll_id: string; choice: string }) => { dbVotes[v.poll_id] = v.choice; });
         const localVotes = JSON.parse(localStorage.getItem('voted_polls_dict') || '{}');
         const mergedVotes = { ...localVotes, ...dbVotes };
         setVotedPolls(mergedVotes);
@@ -156,46 +211,20 @@ export default function Home() {
     const isShowingStats = showStats || currentPoll.id in votedPolls;
 
     if (isShowingStats && !pollStats[currentPoll.id]) {
+      // Aggregated server-side (get_poll_stats RPC) instead of pulling every
+      // voter's row (choice/city/date_of_birth) into the browser to compute
+      // client-side — faster, and no per-voter data ever leaves the DB.
       const fetchRealStats = async () => {
-        const { data } = await supabase.from('votes').select('choice, created_at, users(city, date_of_birth)').eq('poll_id', currentPoll.id);
-        if (!data) return;
-
-        const citiesA: Record<string, number> = {}; const citiesB: Record<string, number> = {};
-        const ages = { '0-18': { a: 0, b: 0, total: 0 }, '19-25': { a: 0, b: 0, total: 0 }, '26-35': { a: 0, b: 0, total: 0 }, '36+': { a: 0, b: 0, total: 0 } };
-        const trends: Record<string, {a: number, b: number}> = {};
-
-        data.forEach(vote => {
-          const user = vote.users as any;
-          if (user && !Array.isArray(user)) {
-            if (user.city) {
-              if (vote.choice === 'A') citiesA[user.city] = (citiesA[user.city] || 0) + 1;
-              else citiesB[user.city] = (citiesB[user.city] || 0) + 1;
-            }
-            if (user.date_of_birth) {
-              const age = new Date().getFullYear() - new Date(user.date_of_birth).getFullYear();
-              let bucket: keyof typeof ages = age <= 18 ? '0-18' : age <= 25 ? '19-25' : age <= 35 ? '26-35' : '36+';
-              if (vote.choice === 'A') ages[bucket].a++; else ages[bucket].b++;
-              ages[bucket].total++;
-            }
-          }
-          const day = new Date(vote.created_at).toLocaleDateString('he-IL', { weekday: 'short' });
-          if (!trends[day]) trends[day] = { a: 0, b: 0 };
-          if (vote.choice === 'A') trends[day].a++; else trends[day].b++;
-        });
+        const { data, error } = await supabase.rpc('get_poll_stats', { p_poll_id: currentPoll.id });
+        if (error || !data) return;
 
         setPollStats(prev => ({
-          ...prev, 
+          ...prev,
           [currentPoll.id]: {
-            topCityA: Object.keys(citiesA).sort((a,b) => citiesA[b] - citiesA[a])[0] || 'טרם נקבע',
-            topCityB: Object.keys(citiesB).sort((a,b) => citiesB[b] - citiesB[a])[0] || 'טרם נקבע',
-            ageDistribution: Object.keys(ages).map(l => {
-              const t = ages[l as keyof typeof ages].total;
-              return { label: l, a: t > 0 ? Math.round((ages[l as keyof typeof ages].a / t) * 100) : 50, b: t > 0 ? Math.round((ages[l as keyof typeof ages].b / t) * 100) : 50 };
-            }),
-            trendHistory: Object.keys(trends).slice(-4).map(l => {
-              const t = trends[l];
-              return { label: l, a: (t.a+t.b) > 0 ? Math.round((t.a / (t.a+t.b)) * 100) : 50, b: (t.a+t.b) > 0 ? Math.round((t.b / (t.a+t.b)) * 100) : 50 };
-            }).concat(Object.keys(trends).length === 0 ? [{label: 'היום', a: 50, b: 50}] : [])
+            topCityA: data.topCityA || 'טרם נקבע',
+            topCityB: data.topCityB || 'טרם נקבע',
+            ageDistribution: data.ageDistribution?.length ? data.ageDistribution : DEFAULT_STATS.ageDistribution,
+            trendHistory: data.trendHistory?.length ? data.trendHistory : DEFAULT_STATS.trendHistory,
           }
         }));
       };
@@ -210,7 +239,7 @@ export default function Home() {
     setShowStats(true);
     let deviceId = localStorage.getItem('device_id') || crypto.randomUUID?.() || ('device-' + Date.now());
     
-    supabase.from('votes').insert([{ poll_id: currentPoll.id, choice, device_id: deviceId }]).then();
+    supabase.from('votes').insert([{ poll_id: currentPoll.id, choice, device_id: deviceId, user_id: user?.id ?? null }]).then();
 
     const updatedVotes = { ...votedPolls, [currentPoll.id]: choice };
     setVotedPolls(updatedVotes);
@@ -237,8 +266,10 @@ export default function Home() {
       creator_id: user.id,
       title: newPollTitle,
       option_a: newPollOptA,
+      image_a_url: null,
       option_b: newPollOptB,
-      type: newPollType,
+      image_b_url: null,
+      poll_type: newPollType,
       status: 'active',
       expires_at: expiresAt.toISOString()
     }]);
@@ -301,8 +332,8 @@ export default function Home() {
       {activeTab === 'feed' && filteredPolls.length > 0 && currentPoll && (
         <div className="w-full max-w-md flex flex-col gap-4 justify-center animate-in fade-in zoom-in-95 duration-300">
           <div className="flex flex-wrap gap-2 px-1 justify-center mb-1">
-            <span className={`bg-gradient-to-r ${currentPoll.type === 'blitz' ? 'from-yellow-400 to-orange-500 text-black' : currentPoll.type === 'duel' ? 'from-red-500 to-rose-700 text-white' : 'from-indigo-500 to-purple-600 text-white'} px-4 py-1.5 text-xs font-black rounded-full`}>
-              {currentPoll.type === 'blitz' ? '⚡ סקר בזק' : currentPoll.type === 'duel' ? '⚔️ דו-קרב' : '📊 רגיל'}
+            <span className={`bg-gradient-to-r ${currentPoll.poll_type === 'blitz' ? 'from-yellow-400 to-orange-500 text-black' : currentPoll.poll_type === 'duel' ? 'from-red-500 to-rose-700 text-white' : 'from-indigo-500 to-purple-600 text-white'} px-4 py-1.5 text-xs font-black rounded-full`}>
+              {currentPoll.poll_type === 'blitz' ? '⚡ סקר בזק' : currentPoll.poll_type === 'duel' ? '⚔️ דו-קרב' : '📊 רגיל'}
             </span>
           </div>
           
@@ -313,12 +344,12 @@ export default function Home() {
           <h2 className="text-2xl font-black text-center mb-2">{currentPoll.title}</h2>
 
           <div className="w-full bg-white/5 rounded-[2rem] flex flex-row h-64 sm:h-80 border border-white/10 p-2 gap-2">
-            <button onClick={() => handleVote('A')} className={`flex-1 rounded-2xl font-black flex flex-col items-center justify-center p-4 transition-all ${displayStats ? `bg-cyan-900/40 cursor-default ${userChoice === 'A' ? 'border-4 border-cyan-400 scale-[1.02]' : 'opacity-40'}` : 'bg-gradient-to-br from-cyan-400 to-blue-600 hover:scale-[1.02] active:scale-95'}`}>
-              <span className="text-3xl">{currentPoll.option_a}</span>
+            <button onClick={() => handleVote('A')} className={`flex-1 min-w-0 rounded-2xl font-black flex flex-col items-center justify-center p-4 overflow-hidden transition-all ${displayStats ? `bg-cyan-900/40 cursor-default ${userChoice === 'A' ? 'border-4 border-cyan-400 scale-[1.02]' : 'opacity-40'}` : 'bg-gradient-to-br from-cyan-400 to-blue-600 hover:scale-[1.02] active:scale-95'}`}>
+              <span className={`${getOptionFontSizeClass(currentPoll.option_a)} text-center break-words leading-tight line-clamp-3`}>{currentPoll.option_a}</span>
               {displayStats && <span className="text-5xl text-cyan-300 mt-2">{percentA}%</span>}
             </button>
-            <button onClick={() => handleVote('B')} className={`flex-1 rounded-2xl font-black flex flex-col items-center justify-center p-4 transition-all ${displayStats ? `bg-pink-900/40 cursor-default ${userChoice === 'B' ? 'border-4 border-pink-400 scale-[1.02]' : 'opacity-40'}` : 'bg-gradient-to-br from-pink-400 to-rose-600 hover:scale-[1.02] active:scale-95'}`}>
-              <span className="text-3xl">{currentPoll.option_b}</span>
+            <button onClick={() => handleVote('B')} className={`flex-1 min-w-0 rounded-2xl font-black flex flex-col items-center justify-center p-4 overflow-hidden transition-all ${displayStats ? `bg-pink-900/40 cursor-default ${userChoice === 'B' ? 'border-4 border-pink-400 scale-[1.02]' : 'opacity-40'}` : 'bg-gradient-to-br from-pink-400 to-rose-600 hover:scale-[1.02] active:scale-95'}`}>
+              <span className={`${getOptionFontSizeClass(currentPoll.option_b)} text-center break-words leading-tight line-clamp-3`}>{currentPoll.option_b}</span>
               {displayStats && <span className="text-5xl text-pink-300 mt-2">{percentB}%</span>}
             </button>
           </div>
@@ -351,9 +382,9 @@ export default function Home() {
 
             <input type="text" placeholder="שאלת הסקר (לדוגמה: איפה אוכלים היום?)" value={newPollTitle} onChange={e => setNewPollTitle(e.target.value)} required className="bg-black/50 border border-white/10 rounded-xl p-3 focus:border-cyan-400 outline-none" />
             <div className="flex gap-2">
-			  <input type="text" placeholder="אופציה א'" value={newPollOptA} onChange={e => setNewPollOptA(e.target.value)} required className="flex-1 min-w-0 bg-cyan-900/30 border border-cyan-500/30 rounded-xl p-3 focus:border-cyan-400 outline-none" />
-			  <input type="text" placeholder="אופציה ב'" value={newPollOptB} onChange={e => setNewPollOptB(e.target.value)} required className="flex-1 min-w-0 bg-pink-900/30 border border-pink-500/30 rounded-xl p-3 focus:border-pink-400 outline-none" />
-			</div>
+              <input type="text" placeholder="אופציה א'" value={newPollOptA} onChange={e => setNewPollOptA(e.target.value)} required className="flex-1 min-w-0 bg-cyan-900/30 border border-cyan-500/30 rounded-xl p-3 focus:border-cyan-400 outline-none" />
+              <input type="text" placeholder="אופציה ב'" value={newPollOptB} onChange={e => setNewPollOptB(e.target.value)} required className="flex-1 min-w-0 bg-pink-900/30 border border-pink-500/30 rounded-xl p-3 focus:border-pink-400 outline-none" />
+            </div>
 
             {newPollType === 'blitz' && (
               <div>
@@ -378,6 +409,63 @@ export default function Home() {
             <button onClick={() => { setActiveFilter('duel'); setActiveTab('feed'); }} className={`p-4 rounded-xl font-bold border text-right transition-all ${activeFilter === 'duel' ? 'bg-rose-500/20 border-rose-500 text-rose-400' : 'border-white/10 text-gray-400'}`}>⚔️ דו-קרבות</button>
             <button onClick={() => { setActiveFilter('daily'); setActiveTab('feed'); }} className={`p-4 rounded-xl font-bold border text-right transition-all ${activeFilter === 'daily' ? 'bg-green-500/20 border-green-500 text-green-400' : 'border-white/10 text-gray-400'}`}>📅 סקרים יומיים</button>
           </div>
+
+          <div className="mt-6 pt-6 border-t border-white/10">
+            <h3 className="text-sm font-black text-gray-400 mb-3">סטטוס הצבעה</h3>
+            <div className="flex gap-2 bg-black/50 p-1 rounded-xl">
+              <button onClick={() => setVoteStatusFilter('unvoted')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${voteStatusFilter === 'unvoted' ? 'bg-cyan-500 text-black shadow-md' : 'text-gray-400 hover:text-white'}`}>לא הצבעתי</button>
+              <button onClick={() => setVoteStatusFilter('voted')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${voteStatusFilter === 'voted' ? 'bg-pink-500 text-white shadow-md' : 'text-gray-400 hover:text-white'}`}>כבר הצבעתי</button>
+              <button onClick={() => setVoteStatusFilter('all')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${voteStatusFilter === 'all' ? 'bg-white text-black shadow-md' : 'text-gray-400 hover:text-white'}`}>הכל</button>
+            </div>
+          </div>
+
+          {allTags.length > 0 && (
+            <div className="mt-6 pt-6 border-t border-white/10">
+              <h3 className="text-sm font-black text-gray-400 mb-3">תגיות</h3>
+              <input
+                type="text"
+                placeholder="חפש תגית..."
+                value={tagSearch}
+                onChange={e => setTagSearch(e.target.value)}
+                className="w-full bg-black/50 border border-white/10 rounded-xl p-3 mb-3 text-sm focus:border-cyan-400 outline-none"
+              />
+              <button
+                type="button"
+                onClick={toggleAllTags}
+                className="w-full flex items-center gap-3 p-3 rounded-xl border border-white/20 hover:bg-white/5 transition-all text-right mb-2"
+              >
+                <span className={`w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 transition-all ${allTagsSelected ? 'bg-white border-white' : 'border-white/30'}`}>
+                  {allTagsSelected && <svg className="w-3 h-3 text-black" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>}
+                </span>
+                <span className="font-black text-sm">בחר הכל</span>
+              </button>
+              <div className="flex flex-col gap-2 max-h-60 overflow-y-auto pr-1">
+                {allTags.filter(tag => tag.toLowerCase().includes(tagSearch.toLowerCase())).map(tag => {
+                  const checked = isTagSelected(tag);
+                  return (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => toggleTag(tag)}
+                      className="w-full flex items-center gap-3 p-3 rounded-xl border border-white/10 hover:bg-white/5 transition-all text-right"
+                    >
+                      <span className={`w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 transition-all ${checked ? 'bg-cyan-500 border-cyan-500' : 'border-white/30'}`}>
+                        {checked && <svg className="w-3 h-3 text-black" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>}
+                      </span>
+                      <span className="font-bold text-sm">{tag}</span>
+                    </button>
+                  );
+                })}
+                {allTags.filter(tag => tag.toLowerCase().includes(tagSearch.toLowerCase())).length === 0 && (
+                  <p className="text-gray-500 text-sm text-center py-2">אין תגיות תואמות</p>
+                )}
+              </div>
+            </div>
+          )}
+
+          <button onClick={() => setActiveTab('feed')} className="w-full mt-6 bg-gradient-to-r from-cyan-500 to-pink-500 text-white font-black py-3 rounded-xl active:scale-95 transition-all">
+            הצג תוצאות
+          </button>
         </div>
       )}
 
