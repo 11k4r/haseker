@@ -76,11 +76,14 @@ export default function Home() {
   const [votedPolls, setVotedPolls] = useState<Record<string, string | null>>({});
   const [pollStats, setPollStats] = useState<Record<string, any>>({});
   
-  const [activeTab, setActiveTab] = useState<'feed' | 'filters' | 'create'>('feed');
+  const [activeTab, setActiveTab] = useState<'feed' | 'filters' | 'create' | 'mypolls'>('feed');
   const [activeFilter, setActiveFilter] = useState<string>('all');
   const [selectedTags, setSelectedTags] = useState<string[] | null>(null); // null = all tags, no filtering
   const [voteStatusFilter, setVoteStatusFilter] = useState<'unvoted' | 'voted' | 'all'>('unvoted');
   const [tagSearch, setTagSearch] = useState('');
+
+  const [myPolls, setMyPolls] = useState<any[]>([]);
+  const [loadingMyPolls, setLoadingMyPolls] = useState(false);
   
   const [newPollType, setNewPollType] = useState<'blitz' | 'duel'>('blitz');
   const [newPollTitle, setNewPollTitle] = useState('');
@@ -206,6 +209,17 @@ export default function Home() {
     }
   };
 
+  const fetchMyPolls = async (userId: string) => {
+    setLoadingMyPolls(true);
+    const { data } = await supabase.from('polls').select('*').eq('creator_id', userId).order('created_at', { ascending: false });
+    if (data) setMyPolls(data);
+    setLoadingMyPolls(false);
+  };
+
+  useEffect(() => {
+    if (activeTab === 'mypolls' && user) fetchMyPolls(user.id);
+  }, [activeTab, user]);
+
   useEffect(() => {
     if (!currentPoll) return;
     const isShowingStats = showStats || currentPoll.id in votedPolls;
@@ -319,6 +333,7 @@ export default function Home() {
               {showProfileMenu && (
                 <div className="absolute left-0 mt-2 w-48 bg-[#111827] border border-white/10 rounded-xl p-1 z-50 shadow-2xl">
                   {userRole === 'admin' && <a href="/admin" className="block px-3 py-2 text-sm text-cyan-400 hover:bg-white/5 rounded-lg text-right">ניהול סקרים ⚙️</a>}
+                  <button onClick={() => { setActiveTab('mypolls'); setShowProfileMenu(false); }} className="w-full text-right px-3 py-2 text-sm text-white hover:bg-white/5 rounded-lg">הסקרים שלי 📊</button>
                   <button onClick={() => supabase.auth.signOut()} className="w-full text-right px-3 py-2 text-sm text-rose-400 hover:bg-white/5 rounded-lg">התנתק</button>
                 </div>
               )}
@@ -469,6 +484,54 @@ export default function Home() {
         </div>
       )}
 
+      {activeTab === 'mypolls' && (
+        <div className="w-full max-w-md flex flex-col gap-4 animate-in slide-in-from-bottom-8">
+          <div className="flex items-center justify-between px-1">
+            <h2 className="text-2xl font-black">הסקרים שלי</h2>
+            <button onClick={() => setActiveTab('create')} className="bg-gradient-to-r from-cyan-500 to-pink-500 text-white font-bold text-sm px-4 py-2 rounded-xl active:scale-95 transition-all shrink-0">+ סקר חדש</button>
+          </div>
+
+          {loadingMyPolls ? (
+            <div className="text-center text-gray-400 font-bold py-8">טוען...</div>
+          ) : myPolls.length === 0 ? (
+            <div className="text-center text-gray-400 font-bold py-8">עדיין לא יצרת סקרים</div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {myPolls.map(poll => {
+                const total = (poll.votes_a || 0) + (poll.votes_b || 0);
+                const pctA = total > 0 ? Math.round((poll.votes_a / total) * 100) : 50;
+                const pctB = total > 0 ? Math.round((poll.votes_b / total) * 100) : 50;
+                const isExpired = poll.expires_at && new Date(poll.expires_at) < new Date();
+                return (
+                  <div key={poll.id} className="bg-white/5 border border-white/10 rounded-2xl p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className={`text-xs font-black px-3 py-1 rounded-full ${poll.poll_type === 'blitz' ? 'bg-yellow-500/20 text-yellow-400' : poll.poll_type === 'duel' ? 'bg-rose-500/20 text-rose-400' : 'bg-indigo-500/20 text-indigo-400'}`}>
+                        {poll.poll_type === 'blitz' ? '⚡ בזק' : poll.poll_type === 'duel' ? '⚔️ דו-קרב' : poll.poll_type === 'daily' ? '📅 יומי' : '📊 רגיל'}
+                      </span>
+                      <span className="text-xs font-bold text-gray-500">
+                        {isExpired ? 'הסתיים · ' : ''}{new Date(poll.created_at).toLocaleDateString('he-IL')}
+                      </span>
+                    </div>
+                    {poll.title && <h3 className="font-bold mb-2 truncate">{poll.title}</h3>}
+                    <div className="flex gap-2 text-sm mb-2">
+                      <div className="flex-1 min-w-0 bg-cyan-900/20 rounded-lg p-2 text-center">
+                        <div className="font-bold truncate">{poll.option_a}</div>
+                        <div className="text-cyan-300 font-black">{pctA}%</div>
+                      </div>
+                      <div className="flex-1 min-w-0 bg-pink-900/20 rounded-lg p-2 text-center">
+                        <div className="font-bold truncate">{poll.option_b}</div>
+                        <div className="text-pink-300 font-black">{pctB}%</div>
+                      </div>
+                    </div>
+                    <div className="text-xs text-gray-500 font-bold text-center">סה״כ {total} הצבעות</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="fixed bottom-0 left-0 w-full bg-[#0a0f1c]/90 backdrop-blur-xl border-t border-white/10 px-6 py-4 flex justify-between items-center z-50 pb-safe">
         <button onClick={() => setActiveTab('filters')} className={`flex flex-col items-center gap-1 transition-colors ${activeTab === 'filters' ? 'text-cyan-400' : 'text-gray-500 hover:text-gray-300'}`}>
           <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" /></svg>
@@ -484,6 +547,17 @@ export default function Home() {
           <span className="text-[10px] font-bold">פיד</span>
         </button>
       </div>
+
+      {showAuthModal && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onClick={() => setShowAuthModal(false)}>
+          <div className="w-full max-w-sm bg-[#111827] border border-white/10 rounded-[2rem] p-6 text-center" onClick={e => e.stopPropagation()}>
+            <h3 className="text-xl font-black mb-2">צריך להתחבר קודם</h3>
+            <p className="text-gray-400 text-sm font-bold mb-6">כדי להצביע ביותר מ-3 סקרים או ליצור סקר חדש, יש להתחבר</p>
+            <a href="/login" className="block w-full bg-gradient-to-r from-cyan-500 to-pink-500 text-white font-black py-3 rounded-xl active:scale-95 transition-all mb-2">התחבר</a>
+            <button onClick={() => setShowAuthModal(false)} className="w-full text-gray-400 font-bold py-2 text-sm">לא עכשיו</button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
