@@ -204,9 +204,25 @@ export default function Home() {
     const { data } = await supabase.from('users').select('*').eq('id', userId).single();
     if (data) {
       setUserRole(data.role);
+      setProfNickname(data.nickname || '');
+      setProfCity(data.city || '');
+      setCitySearch(data.city || '');
+      setProfBirthDate(data.date_of_birth || '');
       if (!data.city || !data.date_of_birth) setIsProfileIncomplete(true);
       else setIsProfileIncomplete(false);
     }
+  };
+
+  const submitProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !profCity || !profBirthDate) return;
+    const { error } = await supabase.from('users').update({
+      nickname: profNickname || null,
+      city: profCity,
+      date_of_birth: profBirthDate,
+    }).eq('id', user.id);
+    if (!error) setIsProfileIncomplete(false);
+    else alert('שגיאה בשמירת הפרופיל');
   };
 
   const fetchMyPolls = async (userId: string) => {
@@ -547,6 +563,63 @@ export default function Home() {
           <span className="text-[10px] font-bold">פיד</span>
         </button>
       </div>
+
+      {user && isProfileIncomplete && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+          <div className="w-full max-w-sm bg-[#111827] border border-white/10 rounded-[2rem] p-6">
+            <h3 className="text-xl font-black mb-1 text-center">השלמת פרופיל</h3>
+            <p className="text-gray-400 text-sm font-bold text-center mb-6">כדי להצביע ולראות תוצאות, נא להשלים כמה פרטים</p>
+            <form onSubmit={submitProfile} className="flex flex-col gap-3">
+              <input
+                type="text"
+                placeholder="כינוי (לא חובה)"
+                value={profNickname}
+                onChange={e => setProfNickname(e.target.value)}
+                className="bg-black/50 border border-white/10 rounded-xl p-3 focus:border-cyan-400 outline-none"
+              />
+              <div className="relative">
+                <input
+                  type="text"
+                  placeholder="עיר מגורים"
+                  value={citySearch}
+                  onChange={e => { setCitySearch(e.target.value); setShowCityDropdown(true); setProfCity(''); }}
+                  onFocus={() => setShowCityDropdown(true)}
+                  onBlur={() => setTimeout(() => setShowCityDropdown(false), 200)}
+                  required
+                  className="w-full bg-black/50 border border-white/10 rounded-xl p-3 focus:border-cyan-400 outline-none"
+                />
+                {showCityDropdown && citySearch && (
+                  <div className="absolute w-full mt-1 max-h-48 overflow-y-auto bg-slate-800 border border-white/10 rounded-xl shadow-xl z-50">
+                    {allCities.filter(c => c.includes(citySearch)).slice(0, 50).map(city => (
+                      <div key={city} onMouseDown={() => { setProfCity(city); setCitySearch(city); setShowCityDropdown(false); }} className="p-3 hover:bg-white/10 cursor-pointer text-sm font-bold">
+                        {city}
+                      </div>
+                    ))}
+                    {allCities.filter(c => c.includes(citySearch)).length === 0 && (
+                      <div className="p-3 text-gray-500 text-sm text-center">לא נמצאו ערים</div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <input
+                type="date"
+                value={profBirthDate}
+                onChange={e => setProfBirthDate(e.target.value)}
+                required
+                max={new Date().toISOString().split('T')[0]}
+                className="bg-black/50 border border-white/10 rounded-xl p-3 focus:border-cyan-400 outline-none"
+              />
+              <button
+                type="submit"
+                disabled={!profCity || !profBirthDate}
+                className="mt-2 bg-gradient-to-r from-cyan-500 to-pink-500 text-white font-black py-3 rounded-xl active:scale-95 disabled:opacity-50 transition-all"
+              >
+                שמור והמשך
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
 
       {showAuthModal && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onClick={() => setShowAuthModal(false)}>
