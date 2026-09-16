@@ -94,6 +94,8 @@ export default function Home() {
 
   const [loading, setLoading] = useState(true);
   const [currentPollId, setCurrentPollId] = useState<string | null>(null);
+  const [pollHistory, setPollHistory] = useState<string[]>([]); // up to 100 previously-viewed poll ids, for "back"
+  const [pollSearchText, setPollSearchText] = useState('');
   const [showStats, setShowStats] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const touchStartX = useRef<number | null>(null);
@@ -106,7 +108,12 @@ export default function Home() {
     const typeMatch = activeFilter === 'all' || p.poll_type === activeFilter;
     const tagMatch = !tagsAreFiltered || (p.tags?.some((t: string) => selectedTags!.includes(t)) ?? false);
     const voteMatch = voteStatusFilter === 'all' || (voteStatusFilter === 'voted' ? p.id in votedPolls : !(p.id in votedPolls));
-    return typeMatch && tagMatch && voteMatch;
+    const q = pollSearchText.trim().toLowerCase();
+    const searchMatch = !q ||
+      (p.title || '').toLowerCase().includes(q) ||
+      (p.option_a || '').toLowerCase().includes(q) ||
+      (p.option_b || '').toLowerCase().includes(q);
+    return typeMatch && tagMatch && voteMatch && searchMatch;
   });
   // Resolved by pinned id from the full poll list (so its votes_a/votes_b
   // stay live-updating), NOT by index into filteredPolls — filteredPolls
@@ -202,7 +209,9 @@ export default function Home() {
         const shuffled = shuffleArray(pollData);
         setPolls(shuffled);
         const firstUnvoted = shuffled.find(p => !(p.id in mergedVotes));
-        setCurrentPollId((firstUnvoted ?? shuffled[0])?.id ?? null);
+        const sharedPollId = new URLSearchParams(window.location.search).get('poll');
+        const sharedPoll = sharedPollId ? shuffled.find(p => p.id === sharedPollId) : null;
+        setCurrentPollId((sharedPoll ?? firstUnvoted ?? shuffled[0])?.id ?? null);
       }
 
       setLoading(false);
@@ -325,19 +334,43 @@ export default function Home() {
 
   const clearAutoAdvance = () => { if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; } };
 
+  const sharePoll = (poll: any) => {
+    const url = `${window.location.origin}/?poll=${poll.id}`;
+    const question = poll.title ? poll.title : `${poll.option_a} או ${poll.option_b}`;
+    const text = `${question}? 🔥 בואו להצביע בהסקר!\n${url}`;
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
+  };
+
   // Moves relative to the CURRENT poll's position within filteredPolls at
   // the moment this is called, then pins the result by id — a subsequent
   // vote (which changes filteredPolls under the "unvoted" default filter)
-  // can't yank this back to a different poll afterward.
+  // can't yank this back to a different poll afterward. Forward moves are
+  // pushed onto pollHistory (capped at 100) so goPrev can retrace the
+  // actual viewing history rather than just stepping backward through the
+  // live, constantly-shifting filtered list.
   const goToRelative = (offset: number) => {
     if (filteredPolls.length === 0) return;
     const idx = filteredPolls.findIndex(p => p.id === currentPollId);
     const baseIdx = idx === -1 ? 0 : idx;
     const nextIdx = ((baseIdx + offset) % filteredPolls.length + filteredPolls.length) % filteredPolls.length;
-    setCurrentPollId(filteredPolls[nextIdx].id);
+    const nextId = filteredPolls[nextIdx].id;
+    if (offset > 0 && currentPollId && currentPollId !== nextId) {
+      setPollHistory(prev => {
+        const next = [...prev, currentPollId!];
+        return next.length > 100 ? next.slice(next.length - 100) : next;
+      });
+    }
+    setCurrentPollId(nextId);
   };
   const goNext = () => { clearAutoAdvance(); setShowStats(false); goToRelative(1); };
-  const goPrev = () => { clearAutoAdvance(); setShowStats(false); goToRelative(-1); };
+  const goPrev = () => {
+    clearAutoAdvance();
+    setShowStats(false);
+    if (pollHistory.length === 0) return; // nothing viewed before this yet
+    const prevId = pollHistory[pollHistory.length - 1];
+    setPollHistory(prev => prev.slice(0, -1));
+    setCurrentPollId(prevId);
+  };
 
   const handleTouchStart = (e: React.TouchEvent) => touchStartX.current = e.touches[0].clientX;
   const handleTouchEnd = (e: React.TouchEvent) => {
@@ -385,10 +418,20 @@ export default function Home() {
 
       {activeTab === 'feed' && filteredPolls.length > 0 && currentPoll && (
         <div className="w-full max-w-md flex flex-col gap-4 justify-center animate-in fade-in zoom-in-95 duration-300">
-          <div className="flex flex-wrap gap-2 px-1 justify-center mb-1">
+          <div className="flex items-center justify-between gap-2 px-1 mb-1">
             <span className={`bg-gradient-to-r ${currentPoll.poll_type === 'blitz' ? 'from-yellow-400 to-orange-500 text-black' : currentPoll.poll_type === 'duel' ? 'from-red-500 to-rose-700 text-white' : 'from-indigo-500 to-purple-600 text-white'} px-4 py-1.5 text-xs font-black rounded-full`}>
               {currentPoll.poll_type === 'blitz' ? '⚡ סקר בזק' : currentPoll.poll_type === 'duel' ? '⚔️ דו-קרב' : '📊 רגיל'}
             </span>
+            <button
+              onClick={() => sharePoll(currentPoll)}
+              className="bg-emerald-500/20 hover:bg-emerald-500/40 text-emerald-400 text-xs font-bold px-3 py-1.5 rounded-full flex items-center gap-1.5 transition-all active:scale-95"
+              aria-label="שתף בוואטסאפ"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8.684 13.342a3 3 0 100-2.684m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+              </svg>
+              שתף
+            </button>
           </div>
           
           <div className="text-center font-bold text-sm mb-1">
@@ -457,6 +500,15 @@ export default function Home() {
       {activeTab === 'filters' && (
         <div className="w-full max-w-md bg-white/5 border border-white/10 rounded-[2rem] p-6 animate-in slide-in-from-bottom-8">
           <h2 className="text-2xl font-black mb-6 text-center">סינון סקרים</h2>
+
+          <input
+            type="text"
+            placeholder="חיפוש לפי כותרת או תשובה..."
+            value={pollSearchText}
+            onChange={e => setPollSearchText(e.target.value)}
+            className="w-full bg-black/50 border border-white/10 rounded-xl p-3 mb-6 text-sm focus:border-cyan-400 outline-none"
+          />
+
           <div className="flex flex-col gap-3">
             <button onClick={() => { setActiveFilter('all'); setActiveTab('feed'); }} className={`p-4 rounded-xl font-bold border text-right transition-all ${activeFilter === 'all' ? 'bg-white/20 border-white text-white' : 'border-white/10 text-gray-400'}`}>🌍 כל הסקרים</button>
             <button onClick={() => { setActiveFilter('blitz'); setActiveTab('feed'); }} className={`p-4 rounded-xl font-bold border text-right transition-all ${activeFilter === 'blitz' ? 'bg-yellow-500/20 border-yellow-500 text-yellow-400' : 'border-white/10 text-gray-400'}`}>⚡ סקרי בזק</button>
