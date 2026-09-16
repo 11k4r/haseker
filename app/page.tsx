@@ -314,7 +314,7 @@ export default function Home() {
 
   const clearAutoAdvance = () => { if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; } };
   const goNext = () => { clearAutoAdvance(); setCurrentIndex(currentIndex + 1); setShowStats(false); };
-  const goPrev = () => { clearAutoAdvance(); setCurrentIndex(currentIndex - 1); setShowStats(true); };
+  const goPrev = () => { clearAutoAdvance(); setCurrentIndex(currentIndex - 1); setShowStats(false); };
 
   const handleTouchStart = (e: React.TouchEvent) => touchStartX.current = e.touches[0].clientX;
   const handleTouchEnd = (e: React.TouchEvent) => {
