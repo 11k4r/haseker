@@ -93,7 +93,7 @@ export default function Home() {
   const [isCreating, setIsCreating] = useState(false);
 
   const [loading, setLoading] = useState(true);
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentPollId, setCurrentPollId] = useState<string | null>(null);
   const [showStats, setShowStats] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const touchStartX = useRef<number | null>(null);
@@ -108,8 +108,12 @@ export default function Home() {
     const voteMatch = voteStatusFilter === 'all' || (voteStatusFilter === 'voted' ? p.id in votedPolls : !(p.id in votedPolls));
     return typeMatch && tagMatch && voteMatch;
   });
-  const safeIndex = filteredPolls.length > 0 ? ((currentIndex % filteredPolls.length) + filteredPolls.length) % filteredPolls.length : 0;
-  const currentPoll = filteredPolls[safeIndex];
+  // Resolved by pinned id from the full poll list (so its votes_a/votes_b
+  // stay live-updating), NOT by index into filteredPolls — filteredPolls
+  // reactively drops a poll the instant it's voted on (default filter is
+  // "unvoted"), which used to yank the results screen onto a different poll
+  // mid-vote. currentPollId only changes via explicit navigation.
+  const currentPoll = polls.find(p => p.id === currentPollId) ?? null;
 
   const isTagSelected = (tag: string) => selectedTags === null || selectedTags.includes(tag);
   const allTagsSelected = selectedTags === null || selectedTags.length === allTags.length;
@@ -180,20 +184,27 @@ export default function Home() {
         .eq('status', 'active')
         .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
         .order('created_at', { ascending: false }); 
-      
-      if (pollData) setPolls(shuffleArray(pollData));
 
       // Votes are no longer publicly SELECTable directly (privacy) — use the
       // narrow get_my_votes RPC instead, which only ever returns your own.
       const { data: voteData } = await supabase.rpc('get_my_votes', { p_device_id: deviceId });
+      let mergedVotes: Record<string, string> = {};
       if (voteData) {
         const dbVotes: Record<string, string> = {};
         voteData.forEach((v: { poll_id: string; choice: string }) => { dbVotes[v.poll_id] = v.choice; });
         const localVotes = JSON.parse(localStorage.getItem('voted_polls_dict') || '{}');
-        const mergedVotes = { ...localVotes, ...dbVotes };
+        mergedVotes = { ...localVotes, ...dbVotes };
         setVotedPolls(mergedVotes);
         localStorage.setItem('voted_polls_dict', JSON.stringify(mergedVotes));
       }
+
+      if (pollData) {
+        const shuffled = shuffleArray(pollData);
+        setPolls(shuffled);
+        const firstUnvoted = shuffled.find(p => !(p.id in mergedVotes));
+        setCurrentPollId((firstUnvoted ?? shuffled[0])?.id ?? null);
+      }
+
       setLoading(false);
     }
     fetchData();
@@ -279,7 +290,7 @@ export default function Home() {
 
     timerRef.current = setTimeout(() => {
       if (!user && Object.keys(updatedVotes).length === 3) setShowAuthModal(true);
-      else { setShowStats(false); setCurrentIndex((prev) => prev + 1); }
+      else { setShowStats(false); goToRelative(1); }
     }, 1500);
   };
 
@@ -313,8 +324,20 @@ export default function Home() {
   };
 
   const clearAutoAdvance = () => { if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; } };
-  const goNext = () => { clearAutoAdvance(); setCurrentIndex(currentIndex + 1); setShowStats(false); };
-  const goPrev = () => { clearAutoAdvance(); setCurrentIndex(currentIndex - 1); setShowStats(false); };
+
+  // Moves relative to the CURRENT poll's position within filteredPolls at
+  // the moment this is called, then pins the result by id — a subsequent
+  // vote (which changes filteredPolls under the "unvoted" default filter)
+  // can't yank this back to a different poll afterward.
+  const goToRelative = (offset: number) => {
+    if (filteredPolls.length === 0) return;
+    const idx = filteredPolls.findIndex(p => p.id === currentPollId);
+    const baseIdx = idx === -1 ? 0 : idx;
+    const nextIdx = ((baseIdx + offset) % filteredPolls.length + filteredPolls.length) % filteredPolls.length;
+    setCurrentPollId(filteredPolls[nextIdx].id);
+  };
+  const goNext = () => { clearAutoAdvance(); setShowStats(false); goToRelative(1); };
+  const goPrev = () => { clearAutoAdvance(); setShowStats(false); goToRelative(-1); };
 
   const handleTouchStart = (e: React.TouchEvent) => touchStartX.current = e.touches[0].clientX;
   const handleTouchEnd = (e: React.TouchEvent) => {
