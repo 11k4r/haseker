@@ -349,7 +349,21 @@ export default function Home() {
   // actual viewing history rather than just stepping backward through the
   // live, constantly-shifting filtered list.
   const goToRelative = (offset: number) => {
-    if (filteredPolls.length === 0) return;
+    if (filteredPolls.length === 0) {
+      // Nothing to advance to under current filters. Still record the
+      // outgoing poll in history (for "back") before clearing — this is
+      // what correctly triggers the "no polls" empty state once the
+      // just-voted poll's results window closes, instead of leaving that
+      // poll pinned on screen forever.
+      if (offset > 0 && currentPollId) {
+        setPollHistory(prev => {
+          const next = [...prev, currentPollId!];
+          return next.length > 100 ? next.slice(next.length - 100) : next;
+        });
+      }
+      setCurrentPollId(null);
+      return;
+    }
     const idx = filteredPolls.findIndex(p => p.id === currentPollId);
     const baseIdx = idx === -1 ? 0 : idx;
     const nextIdx = ((baseIdx + offset) % filteredPolls.length + filteredPolls.length) % filteredPolls.length;
@@ -416,7 +430,7 @@ export default function Home() {
         </div>
       </div>
 
-      {activeTab === 'feed' && filteredPolls.length > 0 && currentPoll && (
+      {activeTab === 'feed' && currentPoll && (
         <div className="w-full max-w-md flex flex-col gap-4 justify-center animate-in fade-in zoom-in-95 duration-300">
           <div className="flex items-center justify-between gap-2 px-1 mb-1">
             <span className={`bg-gradient-to-r ${currentPoll.poll_type === 'blitz' ? 'from-yellow-400 to-orange-500 text-black' : currentPoll.poll_type === 'duel' ? 'from-red-500 to-rose-700 text-white' : 'from-indigo-500 to-purple-600 text-white'} px-4 py-1.5 text-xs font-black rounded-full`}>
@@ -463,7 +477,7 @@ export default function Home() {
         </div>
       )}
 
-      {activeTab === 'feed' && filteredPolls.length === 0 && (
+      {activeTab === 'feed' && !currentPoll && (
         <div className="flex-1 flex items-center justify-center font-bold text-gray-400">אין סקרים בקטגוריה זו</div>
       )}
 
