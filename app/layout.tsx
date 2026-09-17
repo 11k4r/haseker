@@ -25,7 +25,7 @@ export const metadata: Metadata = {
   // canonical links, etc.) resolve correctly:
   // metadataBase: new URL("https://your-domain.com"),
   title: "הסקר",
-  description: "האפליקציה הממכרת להצבעות וסקרים",
+  description: "זירת הסקרים של ישראל",
   manifest: "/manifest.json",
   appleWebApp: {
     capable: true,
