@@ -32,11 +32,77 @@ const TrendGraph = ({ trend }: { trend: any[] }) => {
   );
 };
 
+// Two-color donut via stroke-dasharray on a circle — no chart library needed.
+const GenderPie = ({ label, pctA, total }: { label: string; pctA: number; total: number }) => {
+  const r = 34;
+  const circumference = 2 * Math.PI * r;
+  const aLength = (pctA / 100) * circumference;
+  return (
+    <div className="flex flex-col items-center gap-1.5">
+      <div className="relative w-20 h-20">
+        <svg viewBox="0 0 80 80" className="w-20 h-20 -rotate-90">
+          <circle cx="40" cy="40" r={r} fill="none" stroke="#f472b6" strokeWidth="12" />
+          <circle cx="40" cy="40" r={r} fill="none" stroke="#22d3ee" strokeWidth="12" strokeDasharray={`${aLength} ${circumference - aLength}`} strokeLinecap="round" />
+        </svg>
+        <div className="absolute inset-0 flex items-center justify-center text-xs font-black">
+          {total > 0 ? `${pctA}%` : '-'}
+        </div>
+      </div>
+      <span className="text-xs font-bold text-gray-300">{label}</span>
+      <span className="text-[10px] text-gray-500">{total} הצבעות</span>
+    </div>
+  );
+};
+
+// A single labeled row with a two-color split bar — used for region/city/age
+// breakdowns in the expanded stats view.
+const SplitBar = ({ label, pctA, pctB, total }: { label: string; pctA: number; pctB: number; total: number }) => (
+  <div className="mb-2.5">
+    <div className="flex justify-between text-xs font-bold text-gray-400 mb-1">
+      <span className="text-gray-200">{label}</span>
+      <span>{total} הצבעות</span>
+    </div>
+    <div className="w-full h-2.5 rounded-full overflow-hidden flex bg-black/40">
+      <div className="bg-cyan-400 h-full" style={{ width: `${pctA}%` }} />
+      <div className="bg-pink-400 h-full" style={{ width: `${pctB}%` }} />
+    </div>
+  </div>
+);
+
+// Hand-rolled SVG pie slice (no charting library dependency, matches the
+// existing TrendGraph approach) — draws optionB as the base circle with
+// optionA's share as a clockwise slice starting at 12 o'clock.
+const PieChart = ({ percentA }: { percentA: number }) => {
+  const size = 100;
+  const r = size / 2;
+  if (percentA <= 0) {
+    return <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto"><circle cx={r} cy={r} r={r} fill="#f472b6" /></svg>;
+  }
+  if (percentA >= 100) {
+    return <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto"><circle cx={r} cy={r} r={r} fill="#22d3ee" /></svg>;
+  }
+  const angle = (percentA / 100) * 360;
+  const rad = (angle - 90) * (Math.PI / 180);
+  const x = r + r * Math.cos(rad);
+  const y = r + r * Math.sin(rad);
+  const largeArc = angle > 180 ? 1 : 0;
+  const path = `M ${r},${r} L ${r},0 A ${r},${r} 0 ${largeArc} 1 ${x},${y} Z`;
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto">
+      <circle cx={r} cy={r} r={r} fill="#f472b6" />
+      <path d={path} fill="#22d3ee" />
+    </svg>
+  );
+};
+
 const DEFAULT_STATS = {
   topCityA: "מחשב...",
   topCityB: "מחשב...",
-  ageDistribution: [{ label: '0-18', a: 50, b: 50 }, { label: '19-25', a: 50, b: 50 }, { label: '26-35', a: 50, b: 50 }, { label: '36+', a: 50, b: 50 }],
+  ageDistribution: [{ label: '0-18', a: 50, b: 50, total: 0 }, { label: '19-25', a: 50, b: 50, total: 0 }, { label: '26-35', a: 50, b: 50, total: 0 }, { label: '36+', a: 50, b: 50, total: 0 }],
   trendHistory: [{ label: 'היום', a: 50, b: 50 }],
+  genderStats: {} as Record<string, { a: number; b: number; total: number }>,
+  regionBreakdown: [] as { region: string; a: number; b: number; total: number }[],
+  cityBreakdown: [] as { city: string; a: number; b: number; total: number }[],
 };
 
 function shuffleArray<T>(arr: T[]): T[] {
@@ -71,6 +137,11 @@ export default function Home() {
   const [showCityDropdown, setShowCityDropdown] = useState(false);
   const [profBirthDate, setProfBirthDate] = useState('');
   const [profNickname, setProfNickname] = useState('');
+  const [profGender, setProfGender] = useState('');
+
+  const [showExpandedStats, setShowExpandedStats] = useState(false);
+  const [expandedStats, setExpandedStats] = useState<any>(null);
+  const [loadingExpandedStats, setLoadingExpandedStats] = useState(false);
   
   const [polls, setPolls] = useState<any[]>([]);
   const [votedPolls, setVotedPolls] = useState<Record<string, string | null>>({});
@@ -97,6 +168,7 @@ export default function Home() {
   const [pollHistory, setPollHistory] = useState<string[]>([]); // up to 100 previously-viewed poll ids, for "back"
   const [pollSearchText, setPollSearchText] = useState('');
   const [showStats, setShowStats] = useState(false);
+  const [statsExpanded, setStatsExpanded] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const touchStartX = useRef<number | null>(null);
 
@@ -228,6 +300,7 @@ export default function Home() {
       setProfCity(data.city || '');
       setCitySearch(data.city || '');
       setProfBirthDate(data.date_of_birth || '');
+      setProfGender(data.gender || '');
       if (!data.city || !data.date_of_birth) setIsProfileIncomplete(true);
       else setIsProfileIncomplete(false);
     }
@@ -240,6 +313,7 @@ export default function Home() {
       nickname: profNickname || null,
       city: profCity,
       date_of_birth: profBirthDate,
+      gender: profGender || null,
     }).eq('id', user.id);
     if (!error) setIsProfileIncomplete(false);
     else alert('שגיאה בשמירת הפרופיל');
@@ -255,6 +329,21 @@ export default function Home() {
   useEffect(() => {
     if (activeTab === 'mypolls' && user) fetchMyPolls(user.id);
   }, [activeTab, user]);
+
+  // If the currently-shown poll no longer matches the active filters (type,
+  // tags, vote status, or search text), jump to the first poll that does.
+  // Scoped deliberately to just the filter controls — NOT to votedPolls or
+  // polls — so voting doesn't retrigger this and fight with the
+  // vote-results pinning logic in goToRelative/handleVote.
+  useEffect(() => {
+    if (!currentPollId) return;
+    const stillMatches = filteredPolls.some(p => p.id === currentPollId);
+    if (!stillMatches) {
+      setCurrentPollId(filteredPolls[0]?.id ?? null);
+      setShowStats(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFilter, selectedTags, voteStatusFilter, pollSearchText]);
 
   useEffect(() => {
     if (!currentPoll) return;
@@ -275,6 +364,9 @@ export default function Home() {
             topCityB: data.topCityB || 'טרם נקבע',
             ageDistribution: data.ageDistribution?.length ? data.ageDistribution : DEFAULT_STATS.ageDistribution,
             trendHistory: data.trendHistory?.length ? data.trendHistory : DEFAULT_STATS.trendHistory,
+            genderStats: data.genderStats || {},
+            regionBreakdown: data.regionBreakdown?.length ? data.regionBreakdown : [],
+            cityBreakdown: data.cityBreakdown?.length ? data.cityBreakdown : [],
           }
         }));
       };
@@ -432,13 +524,18 @@ export default function Home() {
 
       {activeTab === 'feed' && currentPoll && (
         <div className="w-full max-w-md flex flex-col gap-4 justify-center animate-in fade-in zoom-in-95 duration-300">
-          <div className="flex items-center justify-between gap-2 px-1 mb-1">
+          <div className="flex flex-wrap items-center gap-2 px-1 mb-1">
             <span className={`bg-gradient-to-r ${currentPoll.poll_type === 'blitz' ? 'from-yellow-400 to-orange-500 text-black' : currentPoll.poll_type === 'duel' ? 'from-red-500 to-rose-700 text-white' : 'from-indigo-500 to-purple-600 text-white'} px-4 py-1.5 text-xs font-black rounded-full`}>
               {currentPoll.poll_type === 'blitz' ? '⚡ סקר בזק' : currentPoll.poll_type === 'duel' ? '⚔️ דו-קרב' : '📊 רגיל'}
             </span>
+            {currentPoll.tags?.map((tag: string) => (
+              <span key={tag} className="bg-white/10 text-gray-300 text-xs font-bold px-3 py-1.5 rounded-full">
+                {tag}
+              </span>
+            ))}
             <button
               onClick={() => sharePoll(currentPoll)}
-              className="bg-emerald-500/20 hover:bg-emerald-500/40 text-emerald-400 text-xs font-bold px-3 py-1.5 rounded-full flex items-center gap-1.5 transition-all active:scale-95"
+              className="ms-auto bg-emerald-500/20 hover:bg-emerald-500/40 text-emerald-400 text-xs font-bold px-3 py-1.5 rounded-full flex items-center gap-1.5 transition-all active:scale-95"
               aria-label="שתף בוואטסאפ"
             >
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -446,6 +543,7 @@ export default function Home() {
               </svg>
               שתף
             </button>
+
           </div>
           
           <div className="text-center font-bold text-sm mb-1">
@@ -467,11 +565,63 @@ export default function Home() {
 
           {displayStats && statsData && (
             <div className="w-full bg-white/5 rounded-[2rem] p-6 border border-white/10 animate-in fade-in slide-in-from-top-6">
-              <div className="grid grid-cols-2 gap-4 mb-8">
-                <div className="bg-black/30 p-4 rounded-2xl border border-cyan-500/20"><span className="text-xs text-cyan-400 block mb-1">מעוז ה{currentPoll.option_a}</span><span className="font-black text-lg">{statsData.topCityA}</span></div>
-                <div className="bg-black/30 p-4 rounded-2xl border border-pink-500/20"><span className="text-xs text-pink-400 block mb-1">מעוז ה{currentPoll.option_b}</span><span className="font-black text-lg">{statsData.topCityB}</span></div>
+              <div className="flex items-center justify-center gap-10 mb-2">
+                <GenderPie label="גברים" pctA={statsData.genderStats?.male?.a ?? 50} total={statsData.genderStats?.male?.total ?? 0} />
+                <GenderPie label="נשים" pctA={statsData.genderStats?.female?.a ?? 50} total={statsData.genderStats?.female?.total ?? 0} />
               </div>
-              <TrendGraph trend={statsData.trendHistory} />
+              <div className="flex items-center justify-center gap-4 text-[10px] text-gray-400 font-bold mb-4">
+                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-cyan-400 inline-block" />{currentPoll.option_a}</span>
+                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-pink-400 inline-block" />{currentPoll.option_b}</span>
+              </div>
+
+              <button
+                onClick={() => setStatsExpanded(e => !e)}
+                className="w-full flex items-center justify-center gap-1.5 text-xs font-bold text-gray-400 hover:text-white py-2 transition-colors"
+              >
+                {statsExpanded ? 'הסתר פירוט מלא' : 'הצג פירוט מלא'}
+                <svg className={`w-4 h-4 transition-transform ${statsExpanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+
+              {statsExpanded && (
+                <div className="mt-4 pt-4 border-t border-white/10 flex flex-col gap-6 animate-in fade-in slide-in-from-top-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="bg-black/30 p-4 rounded-2xl border border-cyan-500/20"><span className="text-xs text-cyan-400 block mb-1">מעוז ה{currentPoll.option_a}</span><span className="font-black text-lg">{statsData.topCityA}</span></div>
+                    <div className="bg-black/30 p-4 rounded-2xl border border-pink-500/20"><span className="text-xs text-pink-400 block mb-1">מעוז ה{currentPoll.option_b}</span><span className="font-black text-lg">{statsData.topCityB}</span></div>
+                  </div>
+
+                  {statsData.regionBreakdown.length > 0 && (
+                    <div>
+                      <h4 className="text-xs font-black text-gray-400 mb-2">לפי אזור</h4>
+                      {statsData.regionBreakdown.map((r: { region: string; a: number; b: number; total: number }) => (
+                        <SplitBar key={r.region} label={r.region} pctA={r.a} pctB={r.b} total={r.total} />
+                      ))}
+                    </div>
+                  )}
+
+                  {statsData.cityBreakdown.length > 0 && (
+                    <div>
+                      <h4 className="text-xs font-black text-gray-400 mb-2">לפי עיר</h4>
+                      {statsData.cityBreakdown.map((c: { city: string; a: number; b: number; total: number }) => (
+                        <SplitBar key={c.city} label={c.city} pctA={c.a} pctB={c.b} total={c.total} />
+                      ))}
+                    </div>
+                  )}
+
+                  <div>
+                    <h4 className="text-xs font-black text-gray-400 mb-2">לפי גיל</h4>
+                    {statsData.ageDistribution.map((a: { label: string; a: number; b: number; total?: number }) => (
+                      <SplitBar key={a.label} label={a.label} pctA={a.a} pctB={a.b} total={a.total ?? 0} />
+                    ))}
+                  </div>
+
+                  <div>
+                    <h4 className="text-xs font-black text-gray-400 mb-2">מגמה לאורך זמן</h4>
+                    <TrendGraph trend={statsData.trendHistory} />
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -698,6 +848,14 @@ export default function Home() {
                 max={new Date().toISOString().split('T')[0]}
                 className="bg-black/50 border border-white/10 rounded-xl p-3 focus:border-cyan-400 outline-none"
               />
+              <div>
+                <label className="text-xs font-bold text-gray-400 mb-2 block">מגדר (לא חובה)</label>
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => setProfGender(profGender === 'male' ? '' : 'male')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${profGender === 'male' ? 'bg-cyan-500 text-black' : 'bg-black/50 text-gray-400 hover:text-white'}`}>זכר</button>
+                  <button type="button" onClick={() => setProfGender(profGender === 'female' ? '' : 'female')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${profGender === 'female' ? 'bg-pink-500 text-white' : 'bg-black/50 text-gray-400 hover:text-white'}`}>נקבה</button>
+                  <button type="button" onClick={() => setProfGender(profGender === 'other' ? '' : 'other')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${profGender === 'other' ? 'bg-white/30 text-white' : 'bg-black/50 text-gray-400 hover:text-white'}`}>אחר</button>
+                </div>
+              </div>
               <button
                 type="submit"
                 disabled={!profCity || !profBirthDate}
