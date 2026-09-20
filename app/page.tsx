@@ -565,13 +565,9 @@ export default function Home() {
 
           {displayStats && statsData && (
             <div className="w-full bg-white/5 rounded-[2rem] p-6 border border-white/10 animate-in fade-in slide-in-from-top-6">
-              <div className="flex items-center justify-center gap-10 mb-2">
+              <div className="flex items-center justify-center gap-10 mb-4">
                 <GenderPie label="גברים" pctA={statsData.genderStats?.male?.a ?? 50} total={statsData.genderStats?.male?.total ?? 0} />
                 <GenderPie label="נשים" pctA={statsData.genderStats?.female?.a ?? 50} total={statsData.genderStats?.female?.total ?? 0} />
-              </div>
-              <div className="flex items-center justify-center gap-4 text-[10px] text-gray-400 font-bold mb-4">
-                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-cyan-400 inline-block" />{currentPoll.option_a}</span>
-                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-pink-400 inline-block" />{currentPoll.option_b}</span>
               </div>
 
               <button
