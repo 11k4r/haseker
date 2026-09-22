@@ -326,6 +326,33 @@ export default function Home() {
     setLoadingMyPolls(false);
   };
 
+  // Live vote counts across sessions: without this, a poll's votes_a/votes_b
+  // (bumped server-side by the vote-count trigger on every insert) only ever
+  // shows what this tab happened to fetch at load time — another user
+  // voting elsewhere never reaches an already-open tab until it's reloaded.
+  useEffect(() => {
+    const channel = supabase
+      .channel('public-polls-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'polls' }, (payload) => {
+        if (payload.eventType === 'UPDATE') {
+          const updated = payload.new as any;
+          setPolls(prev => prev.map(p => (p.id === updated.id ? { ...p, ...updated } : p)));
+        } else if (payload.eventType === 'INSERT') {
+          const inserted = payload.new as any;
+          const isActive = inserted.status === 'active' && (!inserted.expires_at || new Date(inserted.expires_at) > new Date());
+          if (isActive) {
+            setPolls(prev => (prev.some(p => p.id === inserted.id) ? prev : [...prev, inserted]));
+          }
+        } else if (payload.eventType === 'DELETE') {
+          const deletedId = (payload.old as any).id;
+          setPolls(prev => prev.filter(p => p.id !== deletedId));
+        }
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, []);
+
   useEffect(() => {
     if (activeTab === 'mypolls' && user) fetchMyPolls(user.id);
   }, [activeTab, user]);
