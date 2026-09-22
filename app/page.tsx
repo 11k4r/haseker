@@ -32,11 +32,77 @@ const TrendGraph = ({ trend }: { trend: any[] }) => {
   );
 };
 
+// Two-color donut via stroke-dasharray on a circle — no chart library needed.
+const GenderPie = ({ label, pctA, total }: { label: string; pctA: number; total: number }) => {
+  const r = 34;
+  const circumference = 2 * Math.PI * r;
+  const aLength = (pctA / 100) * circumference;
+  return (
+    <div className="flex flex-col items-center gap-1.5">
+      <div className="relative w-20 h-20">
+        <svg viewBox="0 0 80 80" className="w-20 h-20 -rotate-90">
+          <circle cx="40" cy="40" r={r} fill="none" stroke="#f472b6" strokeWidth="12" />
+          <circle cx="40" cy="40" r={r} fill="none" stroke="#22d3ee" strokeWidth="12" strokeDasharray={`${aLength} ${circumference - aLength}`} strokeLinecap="round" />
+        </svg>
+        <div className="absolute inset-0 flex items-center justify-center text-xs font-black">
+          {total > 0 ? `${pctA}%` : '-'}
+        </div>
+      </div>
+      <span className="text-xs font-bold text-gray-300">{label}</span>
+      <span className="text-[10px] text-gray-500">{total} הצבעות</span>
+    </div>
+  );
+};
+
+// A single labeled row with a two-color split bar — used for region/city/age
+// breakdowns in the expanded stats view.
+const SplitBar = ({ label, pctA, pctB, total }: { label: string; pctA: number; pctB: number; total: number }) => (
+  <div className="mb-2.5">
+    <div className="flex justify-between text-xs font-bold text-gray-400 mb-1">
+      <span className="text-gray-200">{label}</span>
+      <span>{total} הצבעות</span>
+    </div>
+    <div className="w-full h-2.5 rounded-full overflow-hidden flex bg-black/40">
+      <div className="bg-cyan-400 h-full" style={{ width: `${pctA}%` }} />
+      <div className="bg-pink-400 h-full" style={{ width: `${pctB}%` }} />
+    </div>
+  </div>
+);
+
+// Hand-rolled SVG pie slice (no charting library dependency, matches the
+// existing TrendGraph approach) — draws optionB as the base circle with
+// optionA's share as a clockwise slice starting at 12 o'clock.
+const PieChart = ({ percentA }: { percentA: number }) => {
+  const size = 100;
+  const r = size / 2;
+  if (percentA <= 0) {
+    return <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto"><circle cx={r} cy={r} r={r} fill="#f472b6" /></svg>;
+  }
+  if (percentA >= 100) {
+    return <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto"><circle cx={r} cy={r} r={r} fill="#22d3ee" /></svg>;
+  }
+  const angle = (percentA / 100) * 360;
+  const rad = (angle - 90) * (Math.PI / 180);
+  const x = r + r * Math.cos(rad);
+  const y = r + r * Math.sin(rad);
+  const largeArc = angle > 180 ? 1 : 0;
+  const path = `M ${r},${r} L ${r},0 A ${r},${r} 0 ${largeArc} 1 ${x},${y} Z`;
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto">
+      <circle cx={r} cy={r} r={r} fill="#f472b6" />
+      <path d={path} fill="#22d3ee" />
+    </svg>
+  );
+};
+
 const DEFAULT_STATS = {
   topCityA: "מחשב...",
   topCityB: "מחשב...",
-  ageDistribution: [{ label: '0-18', a: 50, b: 50 }, { label: '19-25', a: 50, b: 50 }, { label: '26-35', a: 50, b: 50 }, { label: '36+', a: 50, b: 50 }],
+  ageDistribution: [{ label: '0-18', a: 50, b: 50, total: 0 }, { label: '19-25', a: 50, b: 50, total: 0 }, { label: '26-35', a: 50, b: 50, total: 0 }, { label: '36+', a: 50, b: 50, total: 0 }],
   trendHistory: [{ label: 'היום', a: 50, b: 50 }],
+  genderStats: {} as Record<string, { a: number; b: number; total: number }>,
+  regionBreakdown: [] as { region: string; a: number; b: number; total: number }[],
+  cityBreakdown: [] as { city: string; a: number; b: number; total: number }[],
 };
 
 function shuffleArray<T>(arr: T[]): T[] {
@@ -71,6 +137,11 @@ export default function Home() {
   const [showCityDropdown, setShowCityDropdown] = useState(false);
   const [profBirthDate, setProfBirthDate] = useState('');
   const [profNickname, setProfNickname] = useState('');
+  const [profGender, setProfGender] = useState('');
+
+  const [showExpandedStats, setShowExpandedStats] = useState(false);
+  const [expandedStats, setExpandedStats] = useState<any>(null);
+  const [loadingExpandedStats, setLoadingExpandedStats] = useState(false);
   
   const [polls, setPolls] = useState<any[]>([]);
   const [votedPolls, setVotedPolls] = useState<Record<string, string | null>>({});
@@ -93,8 +164,12 @@ export default function Home() {
   const [isCreating, setIsCreating] = useState(false);
 
   const [loading, setLoading] = useState(true);
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentPollId, setCurrentPollId] = useState<string | null>(null);
+  const [liveVotes, setLiveVotes] = useState<{ votes_a: number; votes_b: number } | null>(null);
+  const [pollHistory, setPollHistory] = useState<string[]>([]); // up to 100 previously-viewed poll ids, for "back"
+  const [pollSearchText, setPollSearchText] = useState('');
   const [showStats, setShowStats] = useState(false);
+  const [statsExpanded, setStatsExpanded] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const touchStartX = useRef<number | null>(null);
 
@@ -106,10 +181,19 @@ export default function Home() {
     const typeMatch = activeFilter === 'all' || p.poll_type === activeFilter;
     const tagMatch = !tagsAreFiltered || (p.tags?.some((t: string) => selectedTags!.includes(t)) ?? false);
     const voteMatch = voteStatusFilter === 'all' || (voteStatusFilter === 'voted' ? p.id in votedPolls : !(p.id in votedPolls));
-    return typeMatch && tagMatch && voteMatch;
+    const q = pollSearchText.trim().toLowerCase();
+    const searchMatch = !q ||
+      (p.title || '').toLowerCase().includes(q) ||
+      (p.option_a || '').toLowerCase().includes(q) ||
+      (p.option_b || '').toLowerCase().includes(q);
+    return typeMatch && tagMatch && voteMatch && searchMatch;
   });
-  const safeIndex = filteredPolls.length > 0 ? ((currentIndex % filteredPolls.length) + filteredPolls.length) % filteredPolls.length : 0;
-  const currentPoll = filteredPolls[safeIndex];
+  // Resolved by pinned id from the full poll list (so its votes_a/votes_b
+  // stay live-updating), NOT by index into filteredPolls — filteredPolls
+  // reactively drops a poll the instant it's voted on (default filter is
+  // "unvoted"), which used to yank the results screen onto a different poll
+  // mid-vote. currentPollId only changes via explicit navigation.
+  const currentPoll = polls.find(p => p.id === currentPollId) ?? null;
 
   const isTagSelected = (tag: string) => selectedTags === null || selectedTags.includes(tag);
   const allTagsSelected = selectedTags === null || selectedTags.length === allTags.length;
@@ -129,12 +213,10 @@ export default function Home() {
   const displayStats = currentPoll && (showStats || currentPoll.id in votedPolls);
   const userChoice = currentPoll ? votedPolls[currentPoll.id] : null;
 
-  let displayVotesA = currentPoll?.votes_a || 0; 
-  let displayVotesB = currentPoll?.votes_b || 0;
-  if (displayVotesA === 0 && displayVotesB === 0 && userChoice) {
-    if (userChoice === 'A') displayVotesA = 1; 
-    if (userChoice === 'B') displayVotesB = 1;
-  }
+  // liveVotes is the fresh, per-poll live-subscribed truth; the cached
+  // list value is only a fallback for the brief window before it loads.
+  const displayVotesA = liveVotes?.votes_a ?? currentPoll?.votes_a ?? 0;
+  const displayVotesB = liveVotes?.votes_b ?? currentPoll?.votes_b ?? 0;
   const totalVotes = displayVotesA + displayVotesB;
   const percentA = totalVotes > 0 ? Math.round((displayVotesA / totalVotes) * 100) : 50;
   const percentB = totalVotes > 0 ? Math.round((displayVotesB / totalVotes) * 100) : 50;
@@ -180,20 +262,29 @@ export default function Home() {
         .eq('status', 'active')
         .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
         .order('created_at', { ascending: false }); 
-      
-      if (pollData) setPolls(shuffleArray(pollData));
 
       // Votes are no longer publicly SELECTable directly (privacy) — use the
       // narrow get_my_votes RPC instead, which only ever returns your own.
       const { data: voteData } = await supabase.rpc('get_my_votes', { p_device_id: deviceId });
+      let mergedVotes: Record<string, string> = {};
       if (voteData) {
         const dbVotes: Record<string, string> = {};
         voteData.forEach((v: { poll_id: string; choice: string }) => { dbVotes[v.poll_id] = v.choice; });
         const localVotes = JSON.parse(localStorage.getItem('voted_polls_dict') || '{}');
-        const mergedVotes = { ...localVotes, ...dbVotes };
+        mergedVotes = { ...localVotes, ...dbVotes };
         setVotedPolls(mergedVotes);
         localStorage.setItem('voted_polls_dict', JSON.stringify(mergedVotes));
       }
+
+      if (pollData) {
+        const shuffled = shuffleArray(pollData);
+        setPolls(shuffled);
+        const firstUnvoted = shuffled.find(p => !(p.id in mergedVotes));
+        const sharedPollId = new URLSearchParams(window.location.search).get('poll');
+        const sharedPoll = sharedPollId ? shuffled.find(p => p.id === sharedPollId) : null;
+        setCurrentPollId((sharedPoll ?? firstUnvoted ?? shuffled[0])?.id ?? null);
+      }
+
       setLoading(false);
     }
     fetchData();
@@ -204,9 +295,27 @@ export default function Home() {
     const { data } = await supabase.from('users').select('*').eq('id', userId).single();
     if (data) {
       setUserRole(data.role);
+      setProfNickname(data.nickname || '');
+      setProfCity(data.city || '');
+      setCitySearch(data.city || '');
+      setProfBirthDate(data.date_of_birth || '');
+      setProfGender(data.gender || '');
       if (!data.city || !data.date_of_birth) setIsProfileIncomplete(true);
       else setIsProfileIncomplete(false);
     }
+  };
+
+  const submitProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !profCity || !profBirthDate) return;
+    const { error } = await supabase.from('users').update({
+      nickname: profNickname || null,
+      city: profCity,
+      date_of_birth: profBirthDate,
+      gender: profGender || null,
+    }).eq('id', user.id);
+    if (!error) setIsProfileIncomplete(false);
+    else alert('שגיאה בשמירת הפרופיל');
   };
 
   const fetchMyPolls = async (userId: string) => {
@@ -216,9 +325,81 @@ export default function Home() {
     setLoadingMyPolls(false);
   };
 
+  // Structural changes only (a poll appearing/disappearing) — NOT vote
+  // counts. Patching votes_a/votes_b for the whole cached list from two
+  // places at once (optimistic math in handleVote + a blanket realtime
+  // UPDATE handler here) is exactly what caused counts to disagree between
+  // sessions. Vote counts are handled below instead, scoped to only the
+  // one poll actually on screen.
+  useEffect(() => {
+    const channel = supabase
+      .channel('public-polls-structure')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'polls' }, (payload) => {
+        const inserted = payload.new as any;
+        const isActive = inserted.status === 'active' && (!inserted.expires_at || new Date(inserted.expires_at) > new Date());
+        if (isActive) {
+          setPolls(prev => (prev.some(p => p.id === inserted.id) ? prev : [...prev, inserted]));
+        }
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'polls' }, (payload) => {
+        const deletedId = (payload.old as any).id;
+        setPolls(prev => prev.filter(p => p.id !== deletedId));
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, []);
+
+  // The single source of truth for the poll currently on screen: fetched
+  // fresh the moment it becomes current, then kept live via a subscription
+  // scoped to that one row (id=eq.<currentPollId>) — not the whole list.
+  // This is what handleVote and the percentage math above actually read.
+  // (State declared up top with the rest — see liveVotes there.)
+  useEffect(() => {
+    if (!currentPollId) {
+      setLiveVotes(null);
+      return;
+    }
+    let cancelled = false;
+    setLiveVotes(null);
+
+    supabase.from('polls').select('votes_a, votes_b').eq('id', currentPollId).single()
+      .then(({ data }) => {
+        if (!cancelled && data) setLiveVotes({ votes_a: data.votes_a ?? 0, votes_b: data.votes_b ?? 0 });
+      });
+
+    const channel = supabase
+      .channel(`poll-votes-${currentPollId}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'polls', filter: `id=eq.${currentPollId}` }, (payload) => {
+        const updated = payload.new as any;
+        setLiveVotes({ votes_a: updated.votes_a ?? 0, votes_b: updated.votes_b ?? 0 });
+      })
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
+  }, [currentPollId]);
+
   useEffect(() => {
     if (activeTab === 'mypolls' && user) fetchMyPolls(user.id);
   }, [activeTab, user]);
+
+  // If the currently-shown poll no longer matches the active filters (type,
+  // tags, vote status, or search text), jump to the first poll that does.
+  // Scoped deliberately to just the filter controls — NOT to votedPolls or
+  // polls — so voting doesn't retrigger this and fight with the
+  // vote-results pinning logic in goToRelative/handleVote.
+  useEffect(() => {
+    if (!currentPollId) return;
+    const stillMatches = filteredPolls.some(p => p.id === currentPollId);
+    if (!stillMatches) {
+      setCurrentPollId(filteredPolls[0]?.id ?? null);
+      setShowStats(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFilter, selectedTags, voteStatusFilter, pollSearchText]);
 
   useEffect(() => {
     if (!currentPoll) return;
@@ -239,6 +420,9 @@ export default function Home() {
             topCityB: data.topCityB || 'טרם נקבע',
             ageDistribution: data.ageDistribution?.length ? data.ageDistribution : DEFAULT_STATS.ageDistribution,
             trendHistory: data.trendHistory?.length ? data.trendHistory : DEFAULT_STATS.trendHistory,
+            genderStats: data.genderStats || {},
+            regionBreakdown: data.regionBreakdown?.length ? data.regionBreakdown : [],
+            cityBreakdown: data.cityBreakdown?.length ? data.cityBreakdown : [],
           }
         }));
       };
@@ -248,22 +432,52 @@ export default function Home() {
 
   const handleVote = async (choice: 'A' | 'B') => {
     if (isProfileIncomplete || !currentPoll) return;
-    if (showStats || currentPoll.id in votedPolls) return; 
-    
-    setShowStats(true);
-    let deviceId = localStorage.getItem('device_id') || crypto.randomUUID?.() || ('device-' + Date.now());
-    
-    supabase.from('votes').insert([{ poll_id: currentPoll.id, choice, device_id: deviceId, user_id: user?.id ?? null }]).then();
+    if (showStats || currentPoll.id in votedPolls) return;
 
-    const updatedVotes = { ...votedPolls, [currentPoll.id]: choice };
+    const votedPollId = currentPoll.id;
+    const previousVotedPolls = votedPolls;
+    let deviceId = localStorage.getItem('device_id') || crypto.randomUUID?.() || ('device-' + Date.now());
+
+    setShowStats(true);
+
+    const updatedVotes = { ...votedPolls, [votedPollId]: choice };
     setVotedPolls(updatedVotes);
     localStorage.setItem('voted_polls_dict', JSON.stringify(updatedVotes));
 
-    setPolls(prev => prev.map(p => p.id === currentPoll.id ? { ...p, votes_a: choice === 'A' ? (p.votes_a || 0) + 1 : (p.votes_a || 0), votes_b: choice === 'B' ? (p.votes_b || 0) + 1 : (p.votes_b || 0) } : p));
+    // Instant feedback on the small, scoped liveVotes state — not the
+    // whole cached polls list. The per-poll subscription above will
+    // shortly deliver the real server-confirmed count for this same poll
+    // and simply overwrite this with the truth.
+    const previousLiveVotes = liveVotes;
+    setLiveVotes(prev => ({
+      votes_a: (prev?.votes_a ?? currentPoll.votes_a ?? 0) + (choice === 'A' ? 1 : 0),
+      votes_b: (prev?.votes_b ?? currentPoll.votes_b ?? 0) + (choice === 'B' ? 1 : 0),
+    }));
+
+    // The above is optimistic — shown immediately for a responsive feel —
+    // but the insert is now actually awaited and checked. Previously this
+    // was fire-and-forget with no error handling at all: if the insert
+    // failed for any reason (flaky connection, RLS, etc.), the UI had
+    // already shown a successful vote, "voted" was already written to
+    // localStorage, and nothing ever corrected it — surviving even a
+    // refresh, while the real vote count silently stayed unchanged.
+    const { error } = await supabase
+      .from('votes')
+      .insert([{ poll_id: votedPollId, choice, device_id: deviceId, user_id: user?.id ?? null }]);
+
+    if (error) {
+      clearAutoAdvance();
+      setVotedPolls(previousVotedPolls);
+      localStorage.setItem('voted_polls_dict', JSON.stringify(previousVotedPolls));
+      setLiveVotes(previousLiveVotes);
+      setShowStats(false);
+      alert('אופס, ההצבעה לא נקלטה. בדוק את החיבור ונסה שוב.');
+      return;
+    }
 
     timerRef.current = setTimeout(() => {
       if (!user && Object.keys(updatedVotes).length === 3) setShowAuthModal(true);
-      else { setShowStats(false); setCurrentIndex((prev) => prev + 1); }
+      else { setShowStats(false); goToRelative(1); }
     }, 1500);
   };
 
@@ -297,8 +511,58 @@ export default function Home() {
   };
 
   const clearAutoAdvance = () => { if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; } };
-  const goNext = () => { clearAutoAdvance(); setCurrentIndex(currentIndex + 1); setShowStats(false); };
-  const goPrev = () => { clearAutoAdvance(); setCurrentIndex(currentIndex - 1); setShowStats(true); };
+
+  const sharePoll = (poll: any) => {
+    const url = `${window.location.origin}/?poll=${poll.id}`;
+    const question = poll.title ? poll.title : `${poll.option_a} או ${poll.option_b}`;
+    const text = `${question}? 🔥 בואו להצביע בהסקר!\n${url}`;
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
+  };
+
+  // Moves relative to the CURRENT poll's position within filteredPolls at
+  // the moment this is called, then pins the result by id — a subsequent
+  // vote (which changes filteredPolls under the "unvoted" default filter)
+  // can't yank this back to a different poll afterward. Forward moves are
+  // pushed onto pollHistory (capped at 100) so goPrev can retrace the
+  // actual viewing history rather than just stepping backward through the
+  // live, constantly-shifting filtered list.
+  const goToRelative = (offset: number) => {
+    if (filteredPolls.length === 0) {
+      // Nothing to advance to under current filters. Still record the
+      // outgoing poll in history (for "back") before clearing — this is
+      // what correctly triggers the "no polls" empty state once the
+      // just-voted poll's results window closes, instead of leaving that
+      // poll pinned on screen forever.
+      if (offset > 0 && currentPollId) {
+        setPollHistory(prev => {
+          const next = [...prev, currentPollId!];
+          return next.length > 100 ? next.slice(next.length - 100) : next;
+        });
+      }
+      setCurrentPollId(null);
+      return;
+    }
+    const idx = filteredPolls.findIndex(p => p.id === currentPollId);
+    const baseIdx = idx === -1 ? 0 : idx;
+    const nextIdx = ((baseIdx + offset) % filteredPolls.length + filteredPolls.length) % filteredPolls.length;
+    const nextId = filteredPolls[nextIdx].id;
+    if (offset > 0 && currentPollId && currentPollId !== nextId) {
+      setPollHistory(prev => {
+        const next = [...prev, currentPollId!];
+        return next.length > 100 ? next.slice(next.length - 100) : next;
+      });
+    }
+    setCurrentPollId(nextId);
+  };
+  const goNext = () => { clearAutoAdvance(); setShowStats(false); goToRelative(1); };
+  const goPrev = () => {
+    clearAutoAdvance();
+    setShowStats(false);
+    if (pollHistory.length === 0) return; // nothing viewed before this yet
+    const prevId = pollHistory[pollHistory.length - 1];
+    setPollHistory(prev => prev.slice(0, -1));
+    setCurrentPollId(prevId);
+  };
 
   const handleTouchStart = (e: React.TouchEvent) => touchStartX.current = e.touches[0].clientX;
   const handleTouchEnd = (e: React.TouchEvent) => {
@@ -344,12 +608,28 @@ export default function Home() {
         </div>
       </div>
 
-      {activeTab === 'feed' && filteredPolls.length > 0 && currentPoll && (
+      {activeTab === 'feed' && currentPoll && (
         <div className="w-full max-w-md flex flex-col gap-4 justify-center animate-in fade-in zoom-in-95 duration-300">
-          <div className="flex flex-wrap gap-2 px-1 justify-center mb-1">
+          <div className="flex flex-wrap items-center gap-2 px-1 mb-1">
             <span className={`bg-gradient-to-r ${currentPoll.poll_type === 'blitz' ? 'from-yellow-400 to-orange-500 text-black' : currentPoll.poll_type === 'duel' ? 'from-red-500 to-rose-700 text-white' : 'from-indigo-500 to-purple-600 text-white'} px-4 py-1.5 text-xs font-black rounded-full`}>
               {currentPoll.poll_type === 'blitz' ? '⚡ סקר בזק' : currentPoll.poll_type === 'duel' ? '⚔️ דו-קרב' : '📊 רגיל'}
             </span>
+            {currentPoll.tags?.map((tag: string) => (
+              <span key={tag} className="bg-white/10 text-gray-300 text-xs font-bold px-3 py-1.5 rounded-full">
+                {tag}
+              </span>
+            ))}
+            <button
+              onClick={() => sharePoll(currentPoll)}
+              className="ms-auto bg-emerald-500/20 hover:bg-emerald-500/40 text-emerald-400 text-xs font-bold px-3 py-1.5 rounded-full flex items-center gap-1.5 transition-all active:scale-95"
+              aria-label="שתף בוואטסאפ"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8.684 13.342a3 3 0 100-2.684m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+              </svg>
+              שתף
+            </button>
+
           </div>
           
           <div className="text-center font-bold text-sm mb-1">
@@ -371,17 +651,65 @@ export default function Home() {
 
           {displayStats && statsData && (
             <div className="w-full bg-white/5 rounded-[2rem] p-6 border border-white/10 animate-in fade-in slide-in-from-top-6">
-              <div className="grid grid-cols-2 gap-4 mb-8">
-                <div className="bg-black/30 p-4 rounded-2xl border border-cyan-500/20"><span className="text-xs text-cyan-400 block mb-1">מעוז ה{currentPoll.option_a}</span><span className="font-black text-lg">{statsData.topCityA}</span></div>
-                <div className="bg-black/30 p-4 rounded-2xl border border-pink-500/20"><span className="text-xs text-pink-400 block mb-1">מעוז ה{currentPoll.option_b}</span><span className="font-black text-lg">{statsData.topCityB}</span></div>
+              <div className="flex items-center justify-center gap-10 mb-4">
+                <GenderPie label="גברים" pctA={statsData.genderStats?.male?.a ?? 50} total={statsData.genderStats?.male?.total ?? 0} />
+                <GenderPie label="נשים" pctA={statsData.genderStats?.female?.a ?? 50} total={statsData.genderStats?.female?.total ?? 0} />
               </div>
-              <TrendGraph trend={statsData.trendHistory} />
+
+              <button
+                onClick={() => setStatsExpanded(e => !e)}
+                className="w-full flex items-center justify-center gap-1.5 text-xs font-bold text-gray-400 hover:text-white py-2 transition-colors"
+              >
+                {statsExpanded ? 'הסתר פירוט מלא' : 'הצג פירוט מלא'}
+                <svg className={`w-4 h-4 transition-transform ${statsExpanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+
+              {statsExpanded && (
+                <div className="mt-4 pt-4 border-t border-white/10 flex flex-col gap-6 animate-in fade-in slide-in-from-top-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="bg-black/30 p-4 rounded-2xl border border-cyan-500/20"><span className="text-xs text-cyan-400 block mb-1">מעוז ה{currentPoll.option_a}</span><span className="font-black text-lg">{statsData.topCityA}</span></div>
+                    <div className="bg-black/30 p-4 rounded-2xl border border-pink-500/20"><span className="text-xs text-pink-400 block mb-1">מעוז ה{currentPoll.option_b}</span><span className="font-black text-lg">{statsData.topCityB}</span></div>
+                  </div>
+
+                  {statsData.regionBreakdown.length > 0 && (
+                    <div>
+                      <h4 className="text-xs font-black text-gray-400 mb-2">לפי אזור</h4>
+                      {statsData.regionBreakdown.map((r: { region: string; a: number; b: number; total: number }) => (
+                        <SplitBar key={r.region} label={r.region} pctA={r.a} pctB={r.b} total={r.total} />
+                      ))}
+                    </div>
+                  )}
+
+                  {statsData.cityBreakdown.length > 0 && (
+                    <div>
+                      <h4 className="text-xs font-black text-gray-400 mb-2">לפי עיר</h4>
+                      {statsData.cityBreakdown.map((c: { city: string; a: number; b: number; total: number }) => (
+                        <SplitBar key={c.city} label={c.city} pctA={c.a} pctB={c.b} total={c.total} />
+                      ))}
+                    </div>
+                  )}
+
+                  <div>
+                    <h4 className="text-xs font-black text-gray-400 mb-2">לפי גיל</h4>
+                    {statsData.ageDistribution.map((a: { label: string; a: number; b: number; total?: number }) => (
+                      <SplitBar key={a.label} label={a.label} pctA={a.a} pctB={a.b} total={a.total ?? 0} />
+                    ))}
+                  </div>
+
+                  <div>
+                    <h4 className="text-xs font-black text-gray-400 mb-2">מגמה לאורך זמן</h4>
+                    <TrendGraph trend={statsData.trendHistory} />
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
 
-      {activeTab === 'feed' && filteredPolls.length === 0 && (
+      {activeTab === 'feed' && !currentPoll && (
         <div className="flex-1 flex items-center justify-center font-bold text-gray-400">אין סקרים בקטגוריה זו</div>
       )}
 
@@ -418,6 +746,15 @@ export default function Home() {
       {activeTab === 'filters' && (
         <div className="w-full max-w-md bg-white/5 border border-white/10 rounded-[2rem] p-6 animate-in slide-in-from-bottom-8">
           <h2 className="text-2xl font-black mb-6 text-center">סינון סקרים</h2>
+
+          <input
+            type="text"
+            placeholder="חיפוש לפי כותרת או תשובה..."
+            value={pollSearchText}
+            onChange={e => setPollSearchText(e.target.value)}
+            className="w-full bg-black/50 border border-white/10 rounded-xl p-3 mb-6 text-sm focus:border-cyan-400 outline-none"
+          />
+
           <div className="flex flex-col gap-3">
             <button onClick={() => { setActiveFilter('all'); setActiveTab('feed'); }} className={`p-4 rounded-xl font-bold border text-right transition-all ${activeFilter === 'all' ? 'bg-white/20 border-white text-white' : 'border-white/10 text-gray-400'}`}>🌍 כל הסקרים</button>
             <button onClick={() => { setActiveFilter('blitz'); setActiveTab('feed'); }} className={`p-4 rounded-xl font-bold border text-right transition-all ${activeFilter === 'blitz' ? 'bg-yellow-500/20 border-yellow-500 text-yellow-400' : 'border-white/10 text-gray-400'}`}>⚡ סקרי בזק</button>
@@ -547,6 +884,71 @@ export default function Home() {
           <span className="text-[10px] font-bold">פיד</span>
         </button>
       </div>
+
+      {user && isProfileIncomplete && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+          <div className="w-full max-w-sm bg-[#111827] border border-white/10 rounded-[2rem] p-6">
+            <h3 className="text-xl font-black mb-1 text-center">השלמת פרופיל</h3>
+            <p className="text-gray-400 text-sm font-bold text-center mb-6">כדי להצביע ולראות תוצאות, נא להשלים כמה פרטים</p>
+            <form onSubmit={submitProfile} className="flex flex-col gap-3">
+              <input
+                type="text"
+                placeholder="כינוי (לא חובה)"
+                value={profNickname}
+                onChange={e => setProfNickname(e.target.value)}
+                className="bg-black/50 border border-white/10 rounded-xl p-3 focus:border-cyan-400 outline-none"
+              />
+              <div className="relative">
+                <input
+                  type="text"
+                  placeholder="עיר מגורים"
+                  value={citySearch}
+                  onChange={e => { setCitySearch(e.target.value); setShowCityDropdown(true); setProfCity(''); }}
+                  onFocus={() => setShowCityDropdown(true)}
+                  onBlur={() => setTimeout(() => setShowCityDropdown(false), 200)}
+                  required
+                  className="w-full bg-black/50 border border-white/10 rounded-xl p-3 focus:border-cyan-400 outline-none"
+                />
+                {showCityDropdown && citySearch && (
+                  <div className="absolute w-full mt-1 max-h-48 overflow-y-auto bg-slate-800 border border-white/10 rounded-xl shadow-xl z-50">
+                    {allCities.filter(c => c.includes(citySearch)).slice(0, 50).map(city => (
+                      <div key={city} onMouseDown={() => { setProfCity(city); setCitySearch(city); setShowCityDropdown(false); }} className="p-3 hover:bg-white/10 cursor-pointer text-sm font-bold">
+                        {city}
+                      </div>
+                    ))}
+                    {allCities.filter(c => c.includes(citySearch)).length === 0 && (
+                      <div className="p-3 text-gray-500 text-sm text-center">לא נמצאו ערים</div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <input
+                type="date"
+                value={profBirthDate}
+                onChange={e => setProfBirthDate(e.target.value)}
+                required
+                max={new Date().toISOString().split('T')[0]}
+                className="bg-black/50 border border-white/10 rounded-xl p-3 focus:border-cyan-400 outline-none"
+              />
+              <div>
+                <label className="text-xs font-bold text-gray-400 mb-2 block">מגדר (לא חובה)</label>
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => setProfGender(profGender === 'male' ? '' : 'male')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${profGender === 'male' ? 'bg-cyan-500 text-black' : 'bg-black/50 text-gray-400 hover:text-white'}`}>זכר</button>
+                  <button type="button" onClick={() => setProfGender(profGender === 'female' ? '' : 'female')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${profGender === 'female' ? 'bg-pink-500 text-white' : 'bg-black/50 text-gray-400 hover:text-white'}`}>נקבה</button>
+                  <button type="button" onClick={() => setProfGender(profGender === 'other' ? '' : 'other')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${profGender === 'other' ? 'bg-white/30 text-white' : 'bg-black/50 text-gray-400 hover:text-white'}`}>אחר</button>
+                </div>
+              </div>
+              <button
+                type="submit"
+                disabled={!profCity || !profBirthDate}
+                className="mt-2 bg-gradient-to-r from-cyan-500 to-pink-500 text-white font-black py-3 rounded-xl active:scale-95 disabled:opacity-50 transition-all"
+              >
+                שמור והמשך
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
 
       {showAuthModal && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onClick={() => setShowAuthModal(false)}>

@@ -7,6 +7,7 @@ import { createPoll, deletePoll, signOutAction, updatePoll } from './actions';
 import { PollForm } from './components/poll-form';
 import { PollsTable } from './components/polls-table';
 import { ToastProvider, useToast } from './components/toast';
+import { supabase } from '@/lib/supabase/client';
 import { EMPTY_POLL_INPUT, pollToInput, type Poll, type PollInput } from '@/lib/types/poll';
 
 interface AdminDashboardProps {
@@ -31,14 +32,42 @@ function AdminDashboardInner({ initialPolls, fetchError }: AdminDashboardProps) 
   const [submitting, setSubmitting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  // `initialPolls` is refreshed automatically by Next.js after each
-  // Server Action (see revalidatePath('/admin') in actions.ts), so it's
-  // used directly as the source of truth rather than copied into state.
+  // `initialPolls` is refreshed automatically by Next.js after this admin's
+  // own Server Actions (see revalidatePath('/admin') in actions.ts) — that
+  // covers changes made from this tab. It does NOT cover a vote cast by
+  // someone else on the public page, which never touches this route at
+  // all, so `polls` is real local state kept in sync from the prop and
+  // overlaid with a realtime subscription below for everything else.
+  const [polls, setPolls] = useState<Poll[]>(initialPolls);
+  useEffect(() => setPolls(initialPolls), [initialPolls]);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel('admin-polls-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'polls' }, (payload) => {
+        if (payload.eventType === 'UPDATE') {
+          const updated = payload.new as Poll;
+          setPolls((prev) => prev.map((p) => (p.id === updated.id ? { ...p, ...updated } : p)));
+        } else if (payload.eventType === 'INSERT') {
+          const inserted = payload.new as Poll;
+          setPolls((prev) => (prev.some((p) => p.id === inserted.id) ? prev : [inserted, ...prev]));
+        } else if (payload.eventType === 'DELETE') {
+          const deletedId = (payload.old as Poll).id;
+          setPolls((prev) => prev.filter((p) => p.id !== deletedId));
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
   const knownTags = useMemo(() => {
     const set = new Set<string>();
-    initialPolls.forEach((p) => p.tags?.forEach((t) => set.add(t)));
+    polls.forEach((p) => p.tags?.forEach((t) => set.add(t)));
     return Array.from(set);
-  }, [initialPolls]);
+  }, [polls]);
 
   useEffect(() => {
     if (fetchError) showToast('error', `שגיאה בטעינת סקרים: ${fetchError}`);
@@ -116,7 +145,7 @@ function AdminDashboardInner({ initialPolls, fetchError }: AdminDashboardProps) 
 
         <div className="lg:col-span-2 bg-white/5 backdrop-blur-xl border border-white/10 p-6 rounded-[2rem] shadow-2xl overflow-x-auto">
           <h2 className="text-2xl font-black mb-6">סקרים קיימים</h2>
-          <PollsTable polls={initialPolls} onEdit={handleEdit} onDelete={handleDelete} deletingId={deletingId} />
+          <PollsTable polls={polls} onEdit={handleEdit} onDelete={handleDelete} deletingId={deletingId} />
         </div>
       </div>
     </main>
