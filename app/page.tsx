@@ -403,18 +403,43 @@ export default function Home() {
 
   const handleVote = async (choice: 'A' | 'B') => {
     if (isProfileIncomplete || !currentPoll) return;
-    if (showStats || currentPoll.id in votedPolls) return; 
-    
-    setShowStats(true);
-    let deviceId = localStorage.getItem('device_id') || crypto.randomUUID?.() || ('device-' + Date.now());
-    
-    supabase.from('votes').insert([{ poll_id: currentPoll.id, choice, device_id: deviceId, user_id: user?.id ?? null }]).then();
+    if (showStats || currentPoll.id in votedPolls) return;
 
-    const updatedVotes = { ...votedPolls, [currentPoll.id]: choice };
+    const votedPollId = currentPoll.id;
+    const previousVotedPolls = votedPolls;
+    let deviceId = localStorage.getItem('device_id') || crypto.randomUUID?.() || ('device-' + Date.now());
+
+    setShowStats(true);
+
+    const updatedVotes = { ...votedPolls, [votedPollId]: choice };
     setVotedPolls(updatedVotes);
     localStorage.setItem('voted_polls_dict', JSON.stringify(updatedVotes));
+    setPolls(prev => prev.map(p => p.id === votedPollId ? { ...p, votes_a: choice === 'A' ? (p.votes_a || 0) + 1 : (p.votes_a || 0), votes_b: choice === 'B' ? (p.votes_b || 0) + 1 : (p.votes_b || 0) } : p));
 
-    setPolls(prev => prev.map(p => p.id === currentPoll.id ? { ...p, votes_a: choice === 'A' ? (p.votes_a || 0) + 1 : (p.votes_a || 0), votes_b: choice === 'B' ? (p.votes_b || 0) + 1 : (p.votes_b || 0) } : p));
+    // The above is optimistic — shown immediately for a responsive feel —
+    // but the insert is now actually awaited and checked. Previously this
+    // was fire-and-forget with no error handling at all: if the insert
+    // failed for any reason (flaky connection, RLS, etc.), the UI had
+    // already shown a successful vote, "voted" was already written to
+    // localStorage, and nothing ever corrected it — surviving even a
+    // refresh, while the real vote count silently stayed unchanged.
+    const { error } = await supabase
+      .from('votes')
+      .insert([{ poll_id: votedPollId, choice, device_id: deviceId, user_id: user?.id ?? null }]);
+
+    if (error) {
+      clearAutoAdvance();
+      setVotedPolls(previousVotedPolls);
+      localStorage.setItem('voted_polls_dict', JSON.stringify(previousVotedPolls));
+      setPolls(prev => prev.map(p => p.id === votedPollId ? {
+        ...p,
+        votes_a: choice === 'A' ? Math.max((p.votes_a || 1) - 1, 0) : p.votes_a,
+        votes_b: choice === 'B' ? Math.max((p.votes_b || 1) - 1, 0) : p.votes_b,
+      } : p));
+      setShowStats(false);
+      alert('אופס, ההצבעה לא נקלטה. בדוק את החיבור ונסה שוב.');
+      return;
+    }
 
     timerRef.current = setTimeout(() => {
       if (!user && Object.keys(updatedVotes).length === 3) setShowAuthModal(true);
