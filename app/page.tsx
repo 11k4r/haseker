@@ -165,6 +165,7 @@ export default function Home() {
 
   const [loading, setLoading] = useState(true);
   const [currentPollId, setCurrentPollId] = useState<string | null>(null);
+  const [liveVotes, setLiveVotes] = useState<{ votes_a: number; votes_b: number } | null>(null);
   const [pollHistory, setPollHistory] = useState<string[]>([]); // up to 100 previously-viewed poll ids, for "back"
   const [pollSearchText, setPollSearchText] = useState('');
   const [showStats, setShowStats] = useState(false);
@@ -212,12 +213,10 @@ export default function Home() {
   const displayStats = currentPoll && (showStats || currentPoll.id in votedPolls);
   const userChoice = currentPoll ? votedPolls[currentPoll.id] : null;
 
-  let displayVotesA = currentPoll?.votes_a || 0; 
-  let displayVotesB = currentPoll?.votes_b || 0;
-  if (displayVotesA === 0 && displayVotesB === 0 && userChoice) {
-    if (userChoice === 'A') displayVotesA = 1; 
-    if (userChoice === 'B') displayVotesB = 1;
-  }
+  // liveVotes is the fresh, per-poll live-subscribed truth; the cached
+  // list value is only a fallback for the brief window before it loads.
+  const displayVotesA = liveVotes?.votes_a ?? currentPoll?.votes_a ?? 0;
+  const displayVotesB = liveVotes?.votes_b ?? currentPoll?.votes_b ?? 0;
   const totalVotes = displayVotesA + displayVotesB;
   const percentA = totalVotes > 0 ? Math.round((displayVotesA / totalVotes) * 100) : 50;
   const percentB = totalVotes > 0 ? Math.round((displayVotesB / totalVotes) * 100) : 50;
@@ -326,32 +325,62 @@ export default function Home() {
     setLoadingMyPolls(false);
   };
 
-  // Live vote counts across sessions: without this, a poll's votes_a/votes_b
-  // (bumped server-side by the vote-count trigger on every insert) only ever
-  // shows what this tab happened to fetch at load time — another user
-  // voting elsewhere never reaches an already-open tab until it's reloaded.
+  // Structural changes only (a poll appearing/disappearing) — NOT vote
+  // counts. Patching votes_a/votes_b for the whole cached list from two
+  // places at once (optimistic math in handleVote + a blanket realtime
+  // UPDATE handler here) is exactly what caused counts to disagree between
+  // sessions. Vote counts are handled below instead, scoped to only the
+  // one poll actually on screen.
   useEffect(() => {
     const channel = supabase
-      .channel('public-polls-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'polls' }, (payload) => {
-        if (payload.eventType === 'UPDATE') {
-          const updated = payload.new as any;
-          setPolls(prev => prev.map(p => (p.id === updated.id ? { ...p, ...updated } : p)));
-        } else if (payload.eventType === 'INSERT') {
-          const inserted = payload.new as any;
-          const isActive = inserted.status === 'active' && (!inserted.expires_at || new Date(inserted.expires_at) > new Date());
-          if (isActive) {
-            setPolls(prev => (prev.some(p => p.id === inserted.id) ? prev : [...prev, inserted]));
-          }
-        } else if (payload.eventType === 'DELETE') {
-          const deletedId = (payload.old as any).id;
-          setPolls(prev => prev.filter(p => p.id !== deletedId));
+      .channel('public-polls-structure')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'polls' }, (payload) => {
+        const inserted = payload.new as any;
+        const isActive = inserted.status === 'active' && (!inserted.expires_at || new Date(inserted.expires_at) > new Date());
+        if (isActive) {
+          setPolls(prev => (prev.some(p => p.id === inserted.id) ? prev : [...prev, inserted]));
         }
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'polls' }, (payload) => {
+        const deletedId = (payload.old as any).id;
+        setPolls(prev => prev.filter(p => p.id !== deletedId));
       })
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
   }, []);
+
+  // The single source of truth for the poll currently on screen: fetched
+  // fresh the moment it becomes current, then kept live via a subscription
+  // scoped to that one row (id=eq.<currentPollId>) — not the whole list.
+  // This is what handleVote and the percentage math above actually read.
+  // (State declared up top with the rest — see liveVotes there.)
+  useEffect(() => {
+    if (!currentPollId) {
+      setLiveVotes(null);
+      return;
+    }
+    let cancelled = false;
+    setLiveVotes(null);
+
+    supabase.from('polls').select('votes_a, votes_b').eq('id', currentPollId).single()
+      .then(({ data }) => {
+        if (!cancelled && data) setLiveVotes({ votes_a: data.votes_a ?? 0, votes_b: data.votes_b ?? 0 });
+      });
+
+    const channel = supabase
+      .channel(`poll-votes-${currentPollId}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'polls', filter: `id=eq.${currentPollId}` }, (payload) => {
+        const updated = payload.new as any;
+        setLiveVotes({ votes_a: updated.votes_a ?? 0, votes_b: updated.votes_b ?? 0 });
+      })
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
+  }, [currentPollId]);
 
   useEffect(() => {
     if (activeTab === 'mypolls' && user) fetchMyPolls(user.id);
@@ -414,7 +443,16 @@ export default function Home() {
     const updatedVotes = { ...votedPolls, [votedPollId]: choice };
     setVotedPolls(updatedVotes);
     localStorage.setItem('voted_polls_dict', JSON.stringify(updatedVotes));
-    setPolls(prev => prev.map(p => p.id === votedPollId ? { ...p, votes_a: choice === 'A' ? (p.votes_a || 0) + 1 : (p.votes_a || 0), votes_b: choice === 'B' ? (p.votes_b || 0) + 1 : (p.votes_b || 0) } : p));
+
+    // Instant feedback on the small, scoped liveVotes state — not the
+    // whole cached polls list. The per-poll subscription above will
+    // shortly deliver the real server-confirmed count for this same poll
+    // and simply overwrite this with the truth.
+    const previousLiveVotes = liveVotes;
+    setLiveVotes(prev => ({
+      votes_a: (prev?.votes_a ?? currentPoll.votes_a ?? 0) + (choice === 'A' ? 1 : 0),
+      votes_b: (prev?.votes_b ?? currentPoll.votes_b ?? 0) + (choice === 'B' ? 1 : 0),
+    }));
 
     // The above is optimistic — shown immediately for a responsive feel —
     // but the insert is now actually awaited and checked. Previously this
@@ -431,11 +469,7 @@ export default function Home() {
       clearAutoAdvance();
       setVotedPolls(previousVotedPolls);
       localStorage.setItem('voted_polls_dict', JSON.stringify(previousVotedPolls));
-      setPolls(prev => prev.map(p => p.id === votedPollId ? {
-        ...p,
-        votes_a: choice === 'A' ? Math.max((p.votes_a || 1) - 1, 0) : p.votes_a,
-        votes_b: choice === 'B' ? Math.max((p.votes_b || 1) - 1, 0) : p.votes_b,
-      } : p));
+      setLiveVotes(previousLiveVotes);
       setShowStats(false);
       alert('אופס, ההצבעה לא נקלטה. בדוק את החיבור ונסה שוב.');
       return;
