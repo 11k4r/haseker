@@ -300,14 +300,14 @@ export default function Home() {
       setCitySearch(data.city || '');
       setProfBirthDate(data.date_of_birth || '');
       setProfGender(data.gender || '');
-      if (!data.city || !data.date_of_birth) setIsProfileIncomplete(true);
+      if (!data.city || !data.date_of_birth || !data.gender) setIsProfileIncomplete(true);
       else setIsProfileIncomplete(false);
     }
   };
 
   const submitProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || !profCity || !profBirthDate) return;
+    if (!user || !profCity || !profBirthDate || !profGender) return;
     const { error } = await supabase.from('users').update({
       nickname: profNickname || null,
       city: profCity,
@@ -931,16 +931,15 @@ export default function Home() {
                 className="bg-black/50 border border-white/10 rounded-xl p-3 focus:border-cyan-400 outline-none"
               />
               <div>
-                <label className="text-xs font-bold text-gray-400 mb-2 block">מגדר (לא חובה)</label>
+                <label className="text-xs font-bold text-gray-400 mb-2 block">מגדר</label>
                 <div className="flex gap-2">
-                  <button type="button" onClick={() => setProfGender(profGender === 'male' ? '' : 'male')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${profGender === 'male' ? 'bg-cyan-500 text-black' : 'bg-black/50 text-gray-400 hover:text-white'}`}>זכר</button>
-                  <button type="button" onClick={() => setProfGender(profGender === 'female' ? '' : 'female')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${profGender === 'female' ? 'bg-pink-500 text-white' : 'bg-black/50 text-gray-400 hover:text-white'}`}>נקבה</button>
-                  <button type="button" onClick={() => setProfGender(profGender === 'other' ? '' : 'other')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${profGender === 'other' ? 'bg-white/30 text-white' : 'bg-black/50 text-gray-400 hover:text-white'}`}>אחר</button>
+                  <button type="button" onClick={() => setProfGender('male')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${profGender === 'male' ? 'bg-cyan-500 text-black' : 'bg-black/50 text-gray-400 hover:text-white'}`}>זכר</button>
+                  <button type="button" onClick={() => setProfGender('female')} className={`flex-1 py-2 rounded-lg font-bold text-sm transition-all ${profGender === 'female' ? 'bg-pink-500 text-white' : 'bg-black/50 text-gray-400 hover:text-white'}`}>נקבה</button>
                 </div>
               </div>
               <button
                 type="submit"
-                disabled={!profCity || !profBirthDate}
+                disabled={!profCity || !profBirthDate || !profGender}
                 className="mt-2 bg-gradient-to-r from-cyan-500 to-pink-500 text-white font-black py-3 rounded-xl active:scale-95 disabled:opacity-50 transition-all"
               >
                 שמור והמשך
