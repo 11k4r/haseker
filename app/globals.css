@@ -21,3 +21,9 @@ body {
   background-color: var(--background);
   color: var(--foreground);
 }
+
+/* Stops the browser's double-tap-to-zoom delay/zoom on interactive elements
+   while still allowing deliberate pinch-zoom (accessibility). */
+button, a, input, select, textarea, [role="button"] {
+  touch-action: manipulation;
+}

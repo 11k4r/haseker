@@ -39,7 +39,14 @@ function AdminDashboardInner({ initialPolls, fetchError }: AdminDashboardProps) 
   // all, so `polls` is real local state kept in sync from the prop and
   // overlaid with a realtime subscription below for everything else.
   const [polls, setPolls] = useState<Poll[]>(initialPolls);
-  useEffect(() => setPolls(initialPolls), [initialPolls]);
+  // Re-sync from the server-provided prop when it changes. Done during render
+  // (React's documented "adjust state on prop change" pattern) rather than in
+  // an effect, which would cause an extra cascading render.
+  const [prevInitialPolls, setPrevInitialPolls] = useState(initialPolls);
+  if (prevInitialPolls !== initialPolls) {
+    setPrevInitialPolls(initialPolls);
+    setPolls(initialPolls);
+  }
 
   useEffect(() => {
     const channel = supabase

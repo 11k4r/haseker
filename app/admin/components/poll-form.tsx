@@ -37,6 +37,7 @@ export function PollForm({ value, onChange, knownTags, editing, submitting, onSu
           <option value="standard">רגיל</option>
           <option value="daily">סקר יומי</option>
           <option value="blitz">בליץ (מוגבל בזמן)</option>
+          <option value="duel">דו-קרב</option>
         </select>
       </div>
 

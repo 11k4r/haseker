@@ -1,9 +1,20 @@
 "use client";
-import { useState, useEffect, useRef } from 'react';
-import type { Session } from '@supabase/supabase-js';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import type { Session, User } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase/client';
+import type { Poll } from '@/lib/types/poll';
+import type { AgeBucket, CityRow, PollStats, PollStatsRpc, RegionRow, TrendPoint, VotedPolls } from '@/lib/poll/types';
+import {
+  getOrCreateDeviceId,
+  isPollOpen,
+  localDateInputValue,
+  mergeVotes,
+  safeParseVotes,
+  shouldPromptLogin,
+  splitPercent,
+} from '@/lib/poll/logic';
 // Trend Graph Component
-const TrendGraph = ({ trend }: { trend: any[] }) => {
+const TrendGraph = ({ trend }: { trend: TrendPoint[] }) => {
   const width = 100;
   const height = 40;
   
@@ -69,40 +80,14 @@ const SplitBar = ({ label, pctA, pctB, total }: { label: string; pctA: number; p
   </div>
 );
 
-// Hand-rolled SVG pie slice (no charting library dependency, matches the
-// existing TrendGraph approach) — draws optionB as the base circle with
-// optionA's share as a clockwise slice starting at 12 o'clock.
-const PieChart = ({ percentA }: { percentA: number }) => {
-  const size = 100;
-  const r = size / 2;
-  if (percentA <= 0) {
-    return <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto"><circle cx={r} cy={r} r={r} fill="#f472b6" /></svg>;
-  }
-  if (percentA >= 100) {
-    return <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto"><circle cx={r} cy={r} r={r} fill="#22d3ee" /></svg>;
-  }
-  const angle = (percentA / 100) * 360;
-  const rad = (angle - 90) * (Math.PI / 180);
-  const x = r + r * Math.cos(rad);
-  const y = r + r * Math.sin(rad);
-  const largeArc = angle > 180 ? 1 : 0;
-  const path = `M ${r},${r} L ${r},0 A ${r},${r} 0 ${largeArc} 1 ${x},${y} Z`;
-  return (
-    <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto">
-      <circle cx={r} cy={r} r={r} fill="#f472b6" />
-      <path d={path} fill="#22d3ee" />
-    </svg>
-  );
-};
-
-const DEFAULT_STATS = {
+const DEFAULT_STATS: PollStats = {
   topCityA: "מחשב...",
   topCityB: "מחשב...",
   ageDistribution: [{ label: '0-18', a: 50, b: 50, total: 0 }, { label: '19-25', a: 50, b: 50, total: 0 }, { label: '26-35', a: 50, b: 50, total: 0 }, { label: '36+', a: 50, b: 50, total: 0 }],
   trendHistory: [{ label: 'היום', a: 50, b: 50 }],
-  genderStats: {} as Record<string, { a: number; b: number; total: number }>,
-  regionBreakdown: [] as { region: string; a: number; b: number; total: number }[],
-  cityBreakdown: [] as { city: string; a: number; b: number; total: number }[],
+  genderStats: {},
+  regionBreakdown: [],
+  cityBreakdown: [],
 };
 
 function shuffleArray<T>(arr: T[]): T[] {
@@ -125,7 +110,7 @@ function getOptionFontSizeClass(text: string): string {
 }
 
 export default function Home() {
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<User | null>(null);
   const [userRole, setUserRole] = useState<string>('user');
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -139,13 +124,10 @@ export default function Home() {
   const [profNickname, setProfNickname] = useState('');
   const [profGender, setProfGender] = useState('');
 
-  const [showExpandedStats, setShowExpandedStats] = useState(false);
-  const [expandedStats, setExpandedStats] = useState<any>(null);
-  const [loadingExpandedStats, setLoadingExpandedStats] = useState(false);
-  
-  const [polls, setPolls] = useState<any[]>([]);
-  const [votedPolls, setVotedPolls] = useState<Record<string, string | null>>({});
-  const [pollStats, setPollStats] = useState<Record<string, any>>({});
+  const [polls, setPolls] = useState<Poll[]>([]);
+  const [votedPolls, setVotedPolls] = useState<VotedPolls>({});
+  const [pollStats, setPollStats] = useState<Record<string, PollStats>>({});
+  const [fetchError, setFetchError] = useState<string | null>(null);
   
   const [activeTab, setActiveTab] = useState<'feed' | 'filters' | 'create' | 'mypolls'>('feed');
   const [activeFilter, setActiveFilter] = useState<string>('all');
@@ -153,10 +135,11 @@ export default function Home() {
   const [voteStatusFilter, setVoteStatusFilter] = useState<'unvoted' | 'voted' | 'all'>('unvoted');
   const [tagSearch, setTagSearch] = useState('');
 
-  const [myPolls, setMyPolls] = useState<any[]>([]);
+  const [myPolls, setMyPolls] = useState<Poll[]>([]);
   const [loadingMyPolls, setLoadingMyPolls] = useState(false);
   
   const [newPollType, setNewPollType] = useState<'blitz' | 'duel'>('blitz');
+  const [now, setNow] = useState(() => Date.now()); // ticks so expired polls drop out of the feed
   const [newPollTitle, setNewPollTitle] = useState('');
   const [newPollOptA, setNewPollOptA] = useState('');
   const [newPollOptB, setNewPollOptB] = useState('');
@@ -165,7 +148,7 @@ export default function Home() {
 
   const [loading, setLoading] = useState(true);
   const [currentPollId, setCurrentPollId] = useState<string | null>(null);
-  const [liveVotes, setLiveVotes] = useState<{ votes_a: number; votes_b: number } | null>(null);
+  const [liveVotesState, setLiveVotes] = useState<{ pollId: string; votes_a: number; votes_b: number } | null>(null);
   const [pollHistory, setPollHistory] = useState<string[]>([]); // up to 100 previously-viewed poll ids, for "back"
   const [pollSearchText, setPollSearchText] = useState('');
   const [showStats, setShowStats] = useState(false);
@@ -174,12 +157,13 @@ export default function Home() {
   const touchStartX = useRef<number | null>(null);
 
   // --- MOVED DERIVED STATE TO TOP ---
-  const allTags = Array.from(new Set(polls.flatMap(p => (p.tags as string[] | undefined) || [])));
+  const allTags = Array.from(new Set(polls.flatMap(p => p.tags ?? [])));
   const tagsAreFiltered = selectedTags !== null && selectedTags.length < allTags.length;
 
   const filteredPolls = polls.filter(p => {
+    if (!isPollOpen(p, now) && !(p.id in votedPolls)) return false;
     const typeMatch = activeFilter === 'all' || p.poll_type === activeFilter;
-    const tagMatch = !tagsAreFiltered || (p.tags?.some((t: string) => selectedTags!.includes(t)) ?? false);
+    const tagMatch = !tagsAreFiltered || (p.tags?.some(t => selectedTags!.includes(t)) ?? false);
     const voteMatch = voteStatusFilter === 'all' || (voteStatusFilter === 'voted' ? p.id in votedPolls : !(p.id in votedPolls));
     const q = pollSearchText.trim().toLowerCase();
     const searchMatch = !q ||
@@ -215,30 +199,66 @@ export default function Home() {
 
   // liveVotes is the fresh, per-poll live-subscribed truth; the cached
   // list value is only a fallback for the brief window before it loads.
+  // Only trust liveVotes if it belongs to the poll on screen (a slow response
+  // for the previous poll must never bleed into the current one).
+  const liveVotes = liveVotesState && liveVotesState.pollId === currentPollId ? liveVotesState : null;
   const displayVotesA = liveVotes?.votes_a ?? currentPoll?.votes_a ?? 0;
   const displayVotesB = liveVotes?.votes_b ?? currentPoll?.votes_b ?? 0;
   const totalVotes = displayVotesA + displayVotesB;
-  const percentA = totalVotes > 0 ? Math.round((displayVotesA / totalVotes) * 100) : 50;
-  const percentB = totalVotes > 0 ? Math.round((displayVotesB / totalVotes) * 100) : 50;
+  const { percentA, percentB } = splitPercent(displayVotesA, displayVotesB);
   
-  const statsData = currentPoll ? (pollStats[currentPoll.id] || DEFAULT_STATS) : null;
+  const statsData: PollStats | null = currentPoll ? (pollStats[currentPoll.id] || DEFAULT_STATS) : null;
   // ----------------------------------
 
+  // Tick once a minute so a poll that expires while the page is open drops out
+  // of the feed (previously expiry was only checked once, at initial load).
   useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const clearAutoAdvance = useCallback(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  const fetchUserData = useCallback(async (userId: string) => {
+    const { data } = await supabase.from('users').select('*').eq('id', userId).single();
+    if (data) {
+      setUserRole(data.role);
+      setProfNickname(data.nickname || '');
+      setProfCity(data.city || '');
+      setCitySearch(data.city || '');
+      setProfBirthDate(data.date_of_birth || '');
+      setProfGender(data.gender || '');
+      setIsProfileIncomplete(!data.city || !data.date_of_birth || !data.gender);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
     const fetchGovCities = async () => {
       try {
         const response = await fetch('https://data.gov.il/api/3/action/datastore_search?resource_id=5c78e9fa-c2e2-4771-93ff-7f400a12f7ba&limit=1500');
         const data = await response.json();
-        if (data?.result?.records) {
-          setAllCities(data.result.records.map((r: any) => (r['שם_ישוב'] || '').trim()).filter((n: string) => n && n !== 'לא רשום').sort());
+        if (!cancelled && data?.result?.records) {
+          const names = (data.result.records as Record<string, unknown>[])
+            .map(r => String(r['שם_ישוב'] ?? '').trim())
+            .filter(name => name && name !== 'לא רשום')
+            .sort();
+          if (names.length > 0) setAllCities(names);
         }
-      } catch (e) {
-        setAllCities(["ירושלים", "תל אביב-יפו", "חיפה"]);
+      } catch {
+        if (!cancelled) setAllCities(["ירושלים", "תל אביב - יפו", "חיפה", "באר שבע", "ראשון לציון", "פתח תקווה", "אשדוד", "נתניה"]);
       }
     };
     fetchGovCities();
 
     supabase.auth.getSession().then(({ data: { session } }: { data: { session: Session | null } }) => {
+      if (cancelled) return;
       setUser(session?.user || null);
       if (session?.user) fetchUserData(session.user.id);
     });
@@ -249,35 +269,46 @@ export default function Home() {
       else { setUserRole('user'); setIsProfileIncomplete(false); }
     });
 
-    let deviceId = localStorage.getItem('device_id');
-    if (!deviceId) {
-      deviceId = crypto.randomUUID?.() || ('device-' + Date.now());
-      localStorage.setItem('device_id', deviceId);
-    }
+    const deviceId = getOrCreateDeviceId(localStorage);
 
     async function fetchData() {
-      const { data: pollData } = await supabase
+      const nowIso = new Date().toISOString();
+      const { data: pollData, error: pollError } = await supabase
         .from('polls')
         .select('*')
         .eq('status', 'active')
-        .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
-        .order('created_at', { ascending: false }); 
+        .or(`expires_at.is.null,expires_at.gt.${nowIso}`)
+        .order('created_at', { ascending: false });
 
-      // Votes are no longer publicly SELECTable directly (privacy) — use the
-      // narrow get_my_votes RPC instead, which only ever returns your own.
+      if (cancelled) return;
+
+      if (pollError) {
+        setFetchError('לא הצלחנו לטעון את הסקרים. בדוק את החיבור ונסה שוב.');
+        setLoading(false);
+        return;
+      }
+      setFetchError(null);
+
+      // Votes are not publicly SELECTable (privacy) — use the narrow
+      // get_my_votes RPC, which only ever returns your own.
       const { data: voteData } = await supabase.rpc('get_my_votes', { p_device_id: deviceId });
-      let mergedVotes: Record<string, string> = {};
+      if (cancelled) return;
+
+      const localVotes = safeParseVotes(localStorage.getItem('voted_polls_dict'));
+      let mergedVotes: VotedPolls = localVotes;
       if (voteData) {
-        const dbVotes: Record<string, string> = {};
-        voteData.forEach((v: { poll_id: string; choice: string }) => { dbVotes[v.poll_id] = v.choice; });
-        const localVotes = JSON.parse(localStorage.getItem('voted_polls_dict') || '{}');
-        mergedVotes = { ...localVotes, ...dbVotes };
-        setVotedPolls(mergedVotes);
+        const dbVotes: VotedPolls = {};
+        (voteData as { poll_id: string; choice: string }[]).forEach(v => { dbVotes[v.poll_id] = v.choice; });
+        mergedVotes = mergeVotes(localVotes, dbVotes);
         localStorage.setItem('voted_polls_dict', JSON.stringify(mergedVotes));
       }
+      setVotedPolls(mergedVotes);
 
       if (pollData) {
-        const shuffled = shuffleArray(pollData);
+        // The query already asks the server for open polls, but clock skew or
+        // a cached response can still hand back one that just expired, so
+        // re-check locally before any of them can be chosen as the current poll.
+        const shuffled = shuffleArray((pollData as Poll[]).filter(p => isPollOpen(p)));
         setPolls(shuffled);
         const firstUnvoted = shuffled.find(p => !(p.id in mergedVotes));
         const sharedPollId = new URLSearchParams(window.location.search).get('poll');
@@ -288,22 +319,13 @@ export default function Home() {
       setLoading(false);
     }
     fetchData();
-    return () => { clearAutoAdvance(); subscription.unsubscribe(); };
-  }, []);
 
-  const fetchUserData = async (userId: string) => {
-    const { data } = await supabase.from('users').select('*').eq('id', userId).single();
-    if (data) {
-      setUserRole(data.role);
-      setProfNickname(data.nickname || '');
-      setProfCity(data.city || '');
-      setCitySearch(data.city || '');
-      setProfBirthDate(data.date_of_birth || '');
-      setProfGender(data.gender || '');
-      if (!data.city || !data.date_of_birth || !data.gender) setIsProfileIncomplete(true);
-      else setIsProfileIncomplete(false);
-    }
-  };
+    return () => {
+      cancelled = true;
+      clearAutoAdvance();
+      subscription.unsubscribe();
+    };
+  }, [clearAutoAdvance, fetchUserData]);
 
   const submitProfile = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -315,14 +337,7 @@ export default function Home() {
       gender: profGender || null,
     }).eq('id', user.id);
     if (!error) setIsProfileIncomplete(false);
-    else alert('שגיאה בשמירת הפרופיל');
-  };
-
-  const fetchMyPolls = async (userId: string) => {
-    setLoadingMyPolls(true);
-    const { data } = await supabase.from('polls').select('*').eq('creator_id', userId).order('created_at', { ascending: false });
-    if (data) setMyPolls(data);
-    setLoadingMyPolls(false);
+    else alert('שגיאה בשמירת הפרופיל. נסה שוב.');
   };
 
   // Structural changes only (a poll appearing/disappearing) — NOT vote
@@ -335,14 +350,22 @@ export default function Home() {
     const channel = supabase
       .channel('public-polls-structure')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'polls' }, (payload) => {
-        const inserted = payload.new as any;
-        const isActive = inserted.status === 'active' && (!inserted.expires_at || new Date(inserted.expires_at) > new Date());
-        if (isActive) {
+        const inserted = payload.new as Poll;
+        if (isPollOpen(inserted)) {
           setPolls(prev => (prev.some(p => p.id === inserted.id) ? prev : [...prev, inserted]));
         }
       })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'polls' }, (payload) => {
+        // Only structural changes matter here (a poll being closed/expired by
+        // an admin). Vote counts are deliberately NOT patched into the list —
+        // see the per-poll subscription below.
+        const updated = payload.new as Poll;
+        if (!isPollOpen(updated)) {
+          setPolls(prev => prev.filter(p => p.id !== updated.id));
+        }
+      })
       .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'polls' }, (payload) => {
-        const deletedId = (payload.old as any).id;
+        const deletedId = (payload.old as { id: string }).id;
         setPolls(prev => prev.filter(p => p.id !== deletedId));
       })
       .subscribe();
@@ -356,23 +379,19 @@ export default function Home() {
   // This is what handleVote and the percentage math above actually read.
   // (State declared up top with the rest — see liveVotes there.)
   useEffect(() => {
-    if (!currentPollId) {
-      setLiveVotes(null);
-      return;
-    }
+    if (!currentPollId) return;
     let cancelled = false;
-    setLiveVotes(null);
 
     supabase.from('polls').select('votes_a, votes_b').eq('id', currentPollId).single()
       .then(({ data }) => {
-        if (!cancelled && data) setLiveVotes({ votes_a: data.votes_a ?? 0, votes_b: data.votes_b ?? 0 });
+        if (!cancelled && data) setLiveVotes({ pollId: currentPollId, votes_a: data.votes_a ?? 0, votes_b: data.votes_b ?? 0 });
       });
 
     const channel = supabase
       .channel(`poll-votes-${currentPollId}`)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'polls', filter: `id=eq.${currentPollId}` }, (payload) => {
-        const updated = payload.new as any;
-        setLiveVotes({ votes_a: updated.votes_a ?? 0, votes_b: updated.votes_b ?? 0 });
+        const updated = payload.new as Pick<Poll, 'votes_a' | 'votes_b'>;
+        setLiveVotes({ pollId: currentPollId, votes_a: updated.votes_a ?? 0, votes_b: updated.votes_b ?? 0 });
       })
       .subscribe();
 
@@ -382,61 +401,85 @@ export default function Home() {
     };
   }, [currentPollId]);
 
+  const userId = user?.id ?? null;
   useEffect(() => {
-    if (activeTab === 'mypolls' && user) fetchMyPolls(user.id);
-  }, [activeTab, user]);
+    if (activeTab !== 'mypolls' || !userId) return;
+    let cancelled = false;
+    supabase.from('polls').select('*').eq('creator_id', userId).order('created_at', { ascending: false })
+      .then(({ data }) => {
+        if (cancelled) return;
+        if (data) setMyPolls(data as Poll[]);
+        setLoadingMyPolls(false);
+      });
+    return () => { cancelled = true; };
+  }, [activeTab, userId]);
 
   // If the currently-shown poll no longer matches the active filters (type,
   // tags, vote status, or search text), jump to the first poll that does.
-  // Scoped deliberately to just the filter controls — NOT to votedPolls or
-  // polls — so voting doesn't retrigger this and fight with the
-  // vote-results pinning logic in goToRelative/handleVote.
-  useEffect(() => {
-    if (!currentPollId) return;
-    const stillMatches = filteredPolls.some(p => p.id === currentPollId);
-    if (!stillMatches) {
+  // Keyed ONLY on the filter controls (not votedPolls/polls) so voting doesn't
+  // retrigger this and fight with the vote-results pinning in goToRelative/
+  // handleVote. Done during render (React's "adjust state when inputs change"
+  // pattern) so there is never a frame showing a poll that fails the filter.
+  const filterSignature = JSON.stringify([activeFilter, selectedTags, voteStatusFilter, pollSearchText]);
+  const [prevFilterSignature, setPrevFilterSignature] = useState(filterSignature);
+  if (prevFilterSignature !== filterSignature) {
+    setPrevFilterSignature(filterSignature);
+    if (currentPollId && !filteredPolls.some(p => p.id === currentPollId)) {
       setCurrentPollId(filteredPolls[0]?.id ?? null);
       setShowStats(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeFilter, selectedTags, voteStatusFilter, pollSearchText]);
+  }
 
+  const currentPollIdForStats = currentPoll?.id ?? null;
+  const isShowingStatsForCurrent = currentPoll ? showStats || currentPoll.id in votedPolls : false;
+  const alreadyHaveStats = currentPollIdForStats ? Boolean(pollStats[currentPollIdForStats]) : false;
+
+  // Pure fetch+map: returns the stats (or null). Callers decide when to store them.
+  const fetchStats = useCallback(async (pollId: string): Promise<PollStats | null> => {
+    // Aggregated server-side (get_poll_stats RPC) instead of pulling every
+    // voter's row into the browser — faster, and no per-voter data leaves the DB.
+    const { data, error } = await supabase.rpc('get_poll_stats', { p_poll_id: pollId });
+    if (error || !data) return null;
+    const d = data as PollStatsRpc;
+    return {
+      topCityA: d.topCityA || 'טרם נקבע',
+      topCityB: d.topCityB || 'טרם נקבע',
+      ageDistribution: (d.ageDistribution?.length ? d.ageDistribution : DEFAULT_STATS.ageDistribution) as AgeBucket[],
+      trendHistory: (d.trendHistory?.length ? d.trendHistory : DEFAULT_STATS.trendHistory) as TrendPoint[],
+      genderStats: d.genderStats || {},
+      regionBreakdown: (d.regionBreakdown?.length ? d.regionBreakdown : []) as RegionRow[],
+      cityBreakdown: (d.cityBreakdown?.length ? d.cityBreakdown : []) as CityRow[],
+    };
+  }, []);
+
+  const loadStats = useCallback(async (pollId: string) => {
+    const stats = await fetchStats(pollId);
+    if (stats) setPollStats(prev => ({ ...prev, [pollId]: stats }));
+  }, [fetchStats]);
+
+  // First view of a poll's results: fetch once. setState only happens inside
+  // the async callback, guarded so it can't fire after the poll changes/unmounts.
   useEffect(() => {
-    if (!currentPoll) return;
-    const isShowingStats = showStats || currentPoll.id in votedPolls;
-
-    if (isShowingStats && !pollStats[currentPoll.id]) {
-      // Aggregated server-side (get_poll_stats RPC) instead of pulling every
-      // voter's row (choice/city/date_of_birth) into the browser to compute
-      // client-side — faster, and no per-voter data ever leaves the DB.
-      const fetchRealStats = async () => {
-        const { data, error } = await supabase.rpc('get_poll_stats', { p_poll_id: currentPoll.id });
-        if (error || !data) return;
-
-        setPollStats(prev => ({
-          ...prev,
-          [currentPoll.id]: {
-            topCityA: data.topCityA || 'טרם נקבע',
-            topCityB: data.topCityB || 'טרם נקבע',
-            ageDistribution: data.ageDistribution?.length ? data.ageDistribution : DEFAULT_STATS.ageDistribution,
-            trendHistory: data.trendHistory?.length ? data.trendHistory : DEFAULT_STATS.trendHistory,
-            genderStats: data.genderStats || {},
-            regionBreakdown: data.regionBreakdown?.length ? data.regionBreakdown : [],
-            cityBreakdown: data.cityBreakdown?.length ? data.cityBreakdown : [],
-          }
-        }));
-      };
-      fetchRealStats();
-    }
-  }, [currentPoll, showStats, votedPolls]); 
+    if (!currentPollIdForStats || !isShowingStatsForCurrent || alreadyHaveStats) return;
+    let cancelled = false;
+    fetchStats(currentPollIdForStats).then(stats => {
+      if (!cancelled && stats) setPollStats(prev => ({ ...prev, [currentPollIdForStats]: stats }));
+    });
+    return () => { cancelled = true; };
+  }, [currentPollIdForStats, isShowingStatsForCurrent, alreadyHaveStats, fetchStats]);
 
   const handleVote = async (choice: 'A' | 'B') => {
     if (isProfileIncomplete || !currentPoll) return;
     if (showStats || currentPoll.id in votedPolls) return;
+    if (!isPollOpen(currentPoll)) {
+      alert('הסקר הזה כבר הסתיים');
+      setPolls(prev => prev.filter(p => p.id !== currentPoll.id));
+      return;
+    }
 
     const votedPollId = currentPoll.id;
     const previousVotedPolls = votedPolls;
-    let deviceId = localStorage.getItem('device_id') || crypto.randomUUID?.() || ('device-' + Date.now());
+    const deviceId = getOrCreateDeviceId(localStorage);
 
     setShowStats(true);
 
@@ -448,11 +491,12 @@ export default function Home() {
     // whole cached polls list. The per-poll subscription above will
     // shortly deliver the real server-confirmed count for this same poll
     // and simply overwrite this with the truth.
-    const previousLiveVotes = liveVotes;
-    setLiveVotes(prev => ({
-      votes_a: (prev?.votes_a ?? currentPoll.votes_a ?? 0) + (choice === 'A' ? 1 : 0),
-      votes_b: (prev?.votes_b ?? currentPoll.votes_b ?? 0) + (choice === 'B' ? 1 : 0),
-    }));
+    const previousLiveVotes = liveVotesState;
+    setLiveVotes({
+      pollId: votedPollId,
+      votes_a: displayVotesA + (choice === 'A' ? 1 : 0),
+      votes_b: displayVotesB + (choice === 'B' ? 1 : 0),
+    });
 
     // The above is optimistic — shown immediately for a responsive feel —
     // but the insert is now actually awaited and checked. Previously this
@@ -475,8 +519,12 @@ export default function Home() {
       return;
     }
 
+    // Our own vote is now in the DB: refresh (or first-load) this poll's stats
+    // so the breakdown includes it instead of serving a stale cached copy.
+    loadStats(votedPollId);
+
     timerRef.current = setTimeout(() => {
-      if (!user && Object.keys(updatedVotes).length === 3) setShowAuthModal(true);
+      if (shouldPromptLogin(Boolean(user), Object.keys(updatedVotes).length)) setShowAuthModal(true);
       else { setShowStats(false); goToRelative(1); }
     }, 1500);
   };
@@ -484,35 +532,59 @@ export default function Home() {
   const submitNewPoll = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return setShowAuthModal(true);
+
+    const title = newPollTitle.trim();
+    const optA = newPollOptA.trim();
+    const optB = newPollOptB.trim();
+    if (!title || !optA || !optB) {
+      alert('יש למלא שאלה ושתי אפשרויות');
+      return;
+    }
+    if (optA.toLowerCase() === optB.toLowerCase()) {
+      alert('שתי האפשרויות חייבות להיות שונות');
+      return;
+    }
+
     setIsCreating(true);
 
+    // Duration is clamped to what the DB policy allows (blitz <= 2h, duel 24h).
+    const minutes = Math.min(120, Math.max(1, parseInt(newPollDuration, 10) || 60));
     const expiresAt = new Date();
-    if (newPollType === 'blitz') expiresAt.setMinutes(expiresAt.getMinutes() + parseInt(newPollDuration));
-    else expiresAt.setHours(expiresAt.getHours() + 24); 
+    if (newPollType === 'blitz') expiresAt.setMinutes(expiresAt.getMinutes() + minutes);
+    else expiresAt.setHours(expiresAt.getHours() + 24);
 
-    const { error } = await supabase.from('polls').insert([{
+    const { data: created, error } = await supabase.from('polls').insert([{
       creator_id: user.id,
-      title: newPollTitle,
-      option_a: newPollOptA,
+      title,
+      option_a: optA,
       image_a_url: null,
-      option_b: newPollOptB,
+      option_b: optB,
       image_b_url: null,
       poll_type: newPollType,
       status: 'active',
-      expires_at: expiresAt.toISOString()
-    }]);
+      expires_at: expiresAt.toISOString(),
+    }]).select().single();
 
     setIsCreating(false);
-    if (!error) {
-      alert("הסקר נוצר בהצלחה!");
-      setActiveTab('feed');
-      window.location.reload();
-    } else alert("שגיאה ביצירת הסקר");
+    if (error || !created) {
+      alert('שגיאה ביצירת הסקר');
+      return;
+    }
+
+    // Keep all in-memory state (votes, history) instead of window.location.reload().
+    const poll = created as Poll;
+    setPolls(prev => (prev.some(p => p.id === poll.id) ? prev : [poll, ...prev]));
+    setNewPollTitle('');
+    setNewPollOptA('');
+    setNewPollOptB('');
+    setNewPollDuration('60');
+    setCurrentPollId(poll.id);
+    setShowStats(false);
+    setActiveTab('feed');
+    alert('הסקר נוצר בהצלחה!');
   };
 
-  const clearAutoAdvance = () => { if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; } };
-
-  const sharePoll = (poll: any) => {
+  const sharePoll = (poll: Poll) => {
     const url = `${window.location.origin}/?poll=${poll.id}`;
     const question = poll.title ? poll.title : `${poll.option_a} או ${poll.option_b}`;
     const text = `${question}? 🔥 בואו להצביע בהסקר!\n${url}`;
@@ -564,11 +636,14 @@ export default function Home() {
     setCurrentPollId(prevId);
   };
 
-  const handleTouchStart = (e: React.TouchEvent) => touchStartX.current = e.touches[0].clientX;
+  const handleTouchStart = (e: React.TouchEvent) => { touchStartX.current = e.touches[0].clientX; };
   const handleTouchEnd = (e: React.TouchEvent) => {
     if (isProfileIncomplete || touchStartX.current === null || activeTab !== 'feed') return;
     const deltaX = e.changedTouches[0].clientX - touchStartX.current;
-    if (Math.abs(deltaX) > 50) deltaX < 0 ? goNext() : goPrev();
+    if (Math.abs(deltaX) > 50) {
+      if (deltaX < 0) goNext();
+      else goPrev();
+    }
     touchStartX.current = null;
   };
 
@@ -597,7 +672,7 @@ export default function Home() {
               {showProfileMenu && (
                 <div className="absolute left-0 mt-2 w-48 bg-[#111827] border border-white/10 rounded-xl p-1 z-50 shadow-2xl">
                   {userRole === 'admin' && <a href="/admin" className="block px-3 py-2 text-sm text-cyan-400 hover:bg-white/5 rounded-lg text-right">ניהול סקרים ⚙️</a>}
-                  <button onClick={() => { setActiveTab('mypolls'); setShowProfileMenu(false); }} className="w-full text-right px-3 py-2 text-sm text-white hover:bg-white/5 rounded-lg">הסקרים שלי 📊</button>
+                  <button onClick={() => { setLoadingMyPolls(true); setActiveTab('mypolls'); setShowProfileMenu(false); }} className="w-full text-right px-3 py-2 text-sm text-white hover:bg-white/5 rounded-lg">הסקרים שלי 📊</button>
                   <button onClick={() => supabase.auth.signOut()} className="w-full text-right px-3 py-2 text-sm text-rose-400 hover:bg-white/5 rounded-lg">התנתק</button>
                 </div>
               )}
@@ -614,7 +689,7 @@ export default function Home() {
             <span className={`bg-gradient-to-r ${currentPoll.poll_type === 'blitz' ? 'from-yellow-400 to-orange-500 text-black' : currentPoll.poll_type === 'duel' ? 'from-red-500 to-rose-700 text-white' : 'from-indigo-500 to-purple-600 text-white'} px-4 py-1.5 text-xs font-black rounded-full`}>
               {currentPoll.poll_type === 'blitz' ? '⚡ סקר בזק' : currentPoll.poll_type === 'duel' ? '⚔️ דו-קרב' : '📊 רגיל'}
             </span>
-            {currentPoll.tags?.map((tag: string) => (
+            {currentPoll.tags?.map(tag => (
               <span key={tag} className="bg-white/10 text-gray-300 text-xs font-bold px-3 py-1.5 rounded-full">
                 {tag}
               </span>
@@ -676,7 +751,7 @@ export default function Home() {
                   {statsData.regionBreakdown.length > 0 && (
                     <div>
                       <h4 className="text-xs font-black text-gray-400 mb-2">לפי אזור</h4>
-                      {statsData.regionBreakdown.map((r: { region: string; a: number; b: number; total: number }) => (
+                      {statsData.regionBreakdown.map((r: RegionRow) => (
                         <SplitBar key={r.region} label={r.region} pctA={r.a} pctB={r.b} total={r.total} />
                       ))}
                     </div>
@@ -685,7 +760,7 @@ export default function Home() {
                   {statsData.cityBreakdown.length > 0 && (
                     <div>
                       <h4 className="text-xs font-black text-gray-400 mb-2">לפי עיר</h4>
-                      {statsData.cityBreakdown.map((c: { city: string; a: number; b: number; total: number }) => (
+                      {statsData.cityBreakdown.map((c: CityRow) => (
                         <SplitBar key={c.city} label={c.city} pctA={c.a} pctB={c.b} total={c.total} />
                       ))}
                     </div>
@@ -693,7 +768,7 @@ export default function Home() {
 
                   <div>
                     <h4 className="text-xs font-black text-gray-400 mb-2">לפי גיל</h4>
-                    {statsData.ageDistribution.map((a: { label: string; a: number; b: number; total?: number }) => (
+                    {statsData.ageDistribution.map((a: AgeBucket) => (
                       <SplitBar key={a.label} label={a.label} pctA={a.a} pctB={a.b} total={a.total ?? 0} />
                     ))}
                   </div>
@@ -710,7 +785,14 @@ export default function Home() {
       )}
 
       {activeTab === 'feed' && !currentPoll && (
-        <div className="flex-1 flex items-center justify-center font-bold text-gray-400">אין סקרים בקטגוריה זו</div>
+        fetchError ? (
+          <div role="alert" className="flex-1 flex flex-col items-center justify-center gap-3 font-bold text-rose-400 text-center px-6">
+            <span>{fetchError}</span>
+            <button onClick={() => window.location.reload()} className="bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-xl text-sm">נסה שוב</button>
+          </div>
+        ) : (
+          <div className="flex-1 flex items-center justify-center font-bold text-gray-400">אין סקרים בקטגוריה זו</div>
+        )
       )}
 
       {activeTab === 'create' && (
@@ -835,10 +917,9 @@ export default function Home() {
           ) : (
             <div className="flex flex-col gap-3">
               {myPolls.map(poll => {
-                const total = (poll.votes_a || 0) + (poll.votes_b || 0);
-                const pctA = total > 0 ? Math.round((poll.votes_a / total) * 100) : 50;
-                const pctB = total > 0 ? Math.round((poll.votes_b / total) * 100) : 50;
-                const isExpired = poll.expires_at && new Date(poll.expires_at) < new Date();
+                const total = (poll.votes_a ?? 0) + (poll.votes_b ?? 0);
+                const { percentA: pctA, percentB: pctB } = splitPercent(poll.votes_a ?? 0, poll.votes_b ?? 0);
+                const isExpired = poll.expires_at ? new Date(poll.expires_at).getTime() < now : false;
                 return (
                   <div key={poll.id} className="bg-white/5 border border-white/10 rounded-2xl p-4">
                     <div className="flex items-center justify-between mb-2">
@@ -903,7 +984,7 @@ export default function Home() {
                   type="text"
                   placeholder="עיר מגורים"
                   value={citySearch}
-                  onChange={e => { setCitySearch(e.target.value); setShowCityDropdown(true); setProfCity(''); }}
+                  onChange={e => { const v = e.target.value; setCitySearch(v); setShowCityDropdown(true); setProfCity(allCities.includes(v.trim()) ? v.trim() : ''); }}
                   onFocus={() => setShowCityDropdown(true)}
                   onBlur={() => setTimeout(() => setShowCityDropdown(false), 200)}
                   required
@@ -927,7 +1008,7 @@ export default function Home() {
                 value={profBirthDate}
                 onChange={e => setProfBirthDate(e.target.value)}
                 required
-                max={new Date().toISOString().split('T')[0]}
+                max={localDateInputValue()}
                 className="bg-black/50 border border-white/10 rounded-xl p-3 focus:border-cyan-400 outline-none"
               />
               <div>

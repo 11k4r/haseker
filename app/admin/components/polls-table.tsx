@@ -12,6 +12,7 @@ interface PollsTableProps {
 const POLL_TYPE_LABEL: Record<Poll['poll_type'], string> = {
   blitz: '⚡ בליץ',
   daily: '📅 יומי',
+  duel: '⚔️ דו-קרב',
   standard: 'רגיל',
 };
 

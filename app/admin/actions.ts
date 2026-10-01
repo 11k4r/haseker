@@ -3,7 +3,7 @@
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { createClient } from '@/lib/supabase/server';
-import type { PollInput } from '@/lib/types/poll';
+import { isPollType, type PollInput } from '@/lib/types/poll';
 
 type ActionResult = { error: string | null };
 
@@ -49,6 +49,7 @@ function toDbPayload(input: PollInput) {
 }
 
 export async function createPoll(input: PollInput): Promise<ActionResult> {
+  if (!isPollType(input.poll_type)) return { error: 'סוג סקר לא תקין' };
   const payload = toDbPayload(input);
   if (!payload.option_a || !payload.option_b) {
     return { error: 'יש למלא את שתי האפשרויות' };
@@ -67,6 +68,7 @@ export async function createPoll(input: PollInput): Promise<ActionResult> {
 }
 
 export async function updatePoll(id: string, input: PollInput): Promise<ActionResult> {
+  if (!isPollType(input.poll_type)) return { error: 'סוג סקר לא תקין' };
   const payload = toDbPayload(input);
   if (!payload.option_a || !payload.option_b) {
     return { error: 'יש למלא את שתי האפשרויות' };

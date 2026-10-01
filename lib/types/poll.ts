@@ -1,4 +1,9 @@
-export type PollType = 'standard' | 'daily' | 'blitz';
+export const POLL_TYPES = ['standard', 'daily', 'blitz', 'duel'] as const;
+export type PollType = (typeof POLL_TYPES)[number];
+
+export function isPollType(value: unknown): value is PollType {
+  return typeof value === 'string' && (POLL_TYPES as readonly string[]).includes(value);
+}
 
 /** A poll row as stored in the `polls` table. */
 export interface Poll {
@@ -12,6 +17,10 @@ export interface Poll {
   tags: string[];
   status: string;
   created_at: string;
+  expires_at: string | null;
+  votes_a: number | null;
+  votes_b: number | null;
+  creator_id: string | null;
 }
 
 /**

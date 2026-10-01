@@ -16,8 +16,9 @@ export const viewport: Viewport = {
   themeColor: "#0a0f1c",
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
-  userScalable: false, // Prevents annoying screen zoom on rapid double-taps
+  // Pinch-zoom is intentionally left enabled: disabling it (maximumScale: 1 /
+  // userScalable: false) is a WCAG 1.4.4 failure for low-vision users. Rapid
+  // double-tap zoom is prevented in CSS instead (touch-action: manipulation).
 };
 
 export const metadata: Metadata = {
